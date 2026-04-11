@@ -2,6 +2,12 @@
 setlocal enabledelayedexpansion
 set "ROOT=%~dp0"
 set "VENV_PY=%ROOT%.venv\Scripts\python.exe"
+set "REPO_DIR=%ROOT%repository"
+
+:: Ensure repository folder exists for first-time launch on new devices
+if not exist "%REPO_DIR%" (
+    mkdir "%REPO_DIR%"
+)
 
 :: 1. Use existing venv python if available
 if exist "%VENV_PY%" (

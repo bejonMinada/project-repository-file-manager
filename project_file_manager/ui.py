@@ -14,7 +14,7 @@ from csv_manager import CSVManager
 from file_scanner import scan_project_files
 from models import ChangeRecord, Project, TrackedFile
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "1.0"
 
 def _format_recent_date(days: int) -> str:
     return (datetime.now() - timedelta(days=days)).isoformat()
