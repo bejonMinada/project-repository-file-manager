@@ -2,7 +2,4 @@
 .venv/
 __pycache__/
 repository/
-project_file_manager/.venv/
-project_file_manager/__pycache__/
-project_file_manager/repository/
 *.pyc
