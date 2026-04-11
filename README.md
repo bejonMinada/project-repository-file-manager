@@ -6,9 +6,13 @@ All data is stored locally in CSV files inside the application folder. No cloud 
 
 ## Features
 
-- Auto-detects project folders inside the built-in `repository` directory on launch.
+- Auto-detects project folders inside the built-in `repository` directory on launch and during global refresh.
+- Global `Refresh` scans the entire repository and updates all projects and tracked file records.
 - Tracks files with checksum-based change detection (`ADD`, `REMOVE`, `MODIFY`, `MOVE`, `META_UPDATE`).
-- Lets you open, rename, and delete tracked files.
+- Lets you add both files and folders into a selected project.
+- File browser supports folder navigation with double-click to enter and `Back` to go up one level.
+- Uses file-type icons (including a zipped-folder icon for compressed files).
+- Lets you open, rename, and remove tracked files/folders.
 - Shows project change history and supports viewing history as a text file.
 - Supports per-project notes.
 - Includes reset functionality with confirmation text for full local data cleanup.
@@ -48,14 +52,16 @@ The launcher will:
 1. Click `Add Project`.
 2. Enter a project name, description, and tags.
 3. Save to create the project folder under `repository`.
-4. Select the project and use `Add Files` to copy files into it.
+4. Select the project and use `Add Files` or `Add Folder`.
+5. Use `Refresh` beside `Add Project` to globally rescan the repository.
 
 ## Main Actions
 
 - `Add Project`: creates a new project folder and project record.
+- `Refresh`: globally refreshes all repository projects and tracked files.
 - `Edit Details`: updates project name/description/tags and logs relevant changes.
-- `Rescan Project`: checks current file state and records detected changes.
 - `View as Text File`: writes project history to a text file and opens it.
+- `Remove File/Folder`: removes selected file/folder from disk and tracking.
 - `Reset`: deletes all projects, tracked files, notes, and CSV records after confirmation.
 
 ## Data Files

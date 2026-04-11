@@ -1,6 +1,8 @@
 import tempfile
 import unittest
+import shutil
 from pathlib import Path
+from unittest.mock import patch
 
 from change_detector import detect_changes
 from csv_manager import CSVManager
@@ -18,19 +20,7 @@ class ProjectFileManagerTests(unittest.TestCase):
         self.csv_manager = CSVManager(base_dir=self.app_data)
 
     def tearDown(self) -> None:
-        # Best-effort cleanup for temporary test files/folders.
-        for child in sorted(self.temp_dir.rglob("*"), reverse=True):
-            try:
-                if child.is_file():
-                    child.unlink()
-                elif child.is_dir():
-                    child.rmdir()
-            except Exception:
-                pass
-        try:
-            self.temp_dir.rmdir()
-        except Exception:
-            pass
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_csv_manager_creates_expected_tables(self) -> None:
         self.assertTrue(self.csv_manager.paths["projects"].exists())
@@ -69,6 +59,51 @@ class ProjectFileManagerTests(unittest.TestCase):
         test_file.write_text("manual note", encoding="utf-8")
         scanned = list(scan_project_files(self.project_root))
         self.assertTrue(any(row["relative_path"] == "manual.md" for row in scanned))
+
+    def test_migrates_legacy_csv_files_when_target_missing(self) -> None:
+        legacy_home = self.temp_dir / "legacy_home"
+        legacy_dir = legacy_home / ".project_doc_tracker"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "projects.csv").write_text(
+            "project_id,project_name,root_path,description,tags,created_date,last_scanned_date\n"
+            "1,Legacy Project,/tmp/legacy,,,2026-01-01T00:00:00,\n",
+            encoding="utf-8",
+        )
+
+        new_data_dir = self.temp_dir / "new_data"
+        new_data_dir.mkdir()
+
+        with patch("csv_manager.Path.home", return_value=legacy_home):
+            manager = CSVManager(base_dir=new_data_dir)
+
+        rows = manager.read_rows("projects")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["project_name"], "Legacy Project")
+
+    def test_does_not_overwrite_existing_csv_during_migration(self) -> None:
+        legacy_home = self.temp_dir / "legacy_home_2"
+        legacy_dir = legacy_home / ".project_doc_tracker"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "projects.csv").write_text(
+            "project_id,project_name,root_path,description,tags,created_date,last_scanned_date\n"
+            "1,Legacy Project,/tmp/legacy,,,2026-01-01T00:00:00,\n",
+            encoding="utf-8",
+        )
+
+        new_data_dir = self.temp_dir / "existing_data"
+        new_data_dir.mkdir()
+        (new_data_dir / "projects.csv").write_text(
+            "project_id,project_name,root_path,description,tags,created_date,last_scanned_date\n"
+            "7,Current Project,/tmp/current,,,2026-02-02T00:00:00,\n",
+            encoding="utf-8",
+        )
+
+        with patch("csv_manager.Path.home", return_value=legacy_home):
+            manager = CSVManager(base_dir=new_data_dir)
+
+        rows = manager.read_rows("projects")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["project_name"], "Current Project")
 
 
 if __name__ == "__main__":

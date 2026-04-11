@@ -4,7 +4,7 @@ import subprocess
 import sys
 import tempfile
 import tkinter as tk
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import List, Optional
@@ -14,10 +14,7 @@ from csv_manager import CSVManager
 from file_scanner import scan_project_files
 from models import ChangeRecord, Project, TrackedFile
 
-APP_VERSION = "1.0"
-
-def _format_recent_date(days: int) -> str:
-    return (datetime.now() - timedelta(days=days)).isoformat()
+APP_VERSION = "1.1"
 
 class DocumentTrackerApp:
     def __init__(self, root: tk.Tk) -> None:
@@ -28,6 +25,24 @@ class DocumentTrackerApp:
         self.folder_icon.put("#e0a800", to=(0, 3, 10, 7))
         self.folder_icon.put("#d18b00", to=(0, 0, 15, 4))
         self.root.iconphoto(False, self.folder_icon)
+        self.tree_folder_icon = self._create_folder_icon("#f0c240", "#d9a72f")
+        self.tree_file_icons = {
+            "python": self._create_file_icon("#4b8bbe", "python"),
+            "text": self._create_file_icon("#8e8e8e", "text"),
+            "markdown": self._create_file_icon("#3d6db5", "markdown"),
+            "csv": self._create_file_icon("#2f9e44", "csv"),
+            "json": self._create_file_icon("#f08c00", "json"),
+            "xml": self._create_file_icon("#c77dff", "xml"),
+            "pdf": self._create_file_icon("#d62828", "pdf"),
+            "image": self._create_file_icon("#e76f51", "image"),
+            "archive": self._create_zip_folder_icon(),
+            "doc": self._create_file_icon("#1565c0", "doc"),
+            "sheet": self._create_file_icon("#2e7d32", "sheet"),
+            "slide": self._create_file_icon("#ef6c00", "slide"),
+            "audio": self._create_file_icon("#6a4c93", "audio"),
+            "video": self._create_file_icon("#9c27b0", "video"),
+            "generic": self._create_file_icon("#9e9e9e", "generic"),
+        }
         self.csv = CSVManager()
         self.repository_folder = Path(__file__).resolve().parent / "repository"
         self.repository_folder.mkdir(parents=True, exist_ok=True)
@@ -36,7 +51,9 @@ class DocumentTrackerApp:
         self.change_rows: List[ChangeRecord] = []
         self.selected_project: Optional[Project] = None
         self.selected_file: Optional[TrackedFile] = None
-        self.selected_file_ids: List[str] = []
+        self.current_folder_rel: str = ""
+        self.selected_item_kind: str = ""
+        self.selected_item_rel: str = ""
         self.sort_state = {
             "projects": {"name": False, "tags": False},
             "files": {"path": False, "size": False, "modified": False},
@@ -91,12 +108,13 @@ class DocumentTrackerApp:
         self.project_context_menu.add_command(label="View Project Details", command=self.view_project_details)
         self.project_context_menu.add_command(label="Edit Details", command=self.edit_project_details)
         self.project_context_menu.add_separator()
-        self.project_context_menu.add_command(label="Remove Project Folder", command=self.remove_project)
         self.project_context_menu.add_command(label="Delete Project Folder", command=self.delete_project_folder)
 
         project_buttons = ttk.Frame(left_frame)
         project_buttons.pack(fill="x", pady=(8, 0))
         ttk.Button(project_buttons, text="Add Project", command=self.add_project).pack(side="left")
+        self.refresh_button = ttk.Button(project_buttons, text="Refresh", command=self.refresh_repository)
+        self.refresh_button.pack(side="left", padx=(4, 0))
 
         file_label = ttk.Label(center_frame, text="Tracked Files")
         file_label.pack(anchor="w")
@@ -105,20 +123,22 @@ class DocumentTrackerApp:
         ttk.Label(filter_frame, text="Search filename:").grid(row=0, column=0, sticky="w")
         self.search_entry = ttk.Entry(filter_frame)
         self.search_entry.grid(row=0, column=1, sticky="ew", padx=4)
+        self.search_entry.bind("<KeyRelease>", lambda event: self.refresh_files())
         ttk.Label(filter_frame, text="Extension:").grid(row=0, column=2, sticky="w", padx=(10, 0))
         self.extension_combo = ttk.Combobox(filter_frame, width=12, state="readonly")
         self.extension_combo.grid(row=0, column=3, sticky="w", padx=4)
         self.extension_combo['values'] = [""]
-        ttk.Button(filter_frame, text="Apply", command=self.refresh_files).grid(row=0, column=4, sticky="e", padx=(10, 0))
+        self.extension_combo.bind("<<ComboboxSelected>>", lambda event: self.refresh_files())
         filter_frame.columnconfigure(1, weight=1)
-        self.file_tree = ttk.Treeview(center_frame, columns=("path", "size", "modified"), show="headings", height=20, selectmode="extended")
-        self.file_tree.heading("path", text="Relative Path", command=lambda: self._sort_file_tree("path"))
+        self.file_tree = ttk.Treeview(center_frame, columns=("size", "modified"), show="tree headings", height=20, selectmode="extended")
+        self.file_tree.heading("#0", text="Item Name", command=lambda: self._sort_file_tree("path"))
         self.file_tree.heading("size", text="Size", command=lambda: self._sort_file_tree("size"))
         self.file_tree.heading("modified", text="Last Modified", command=lambda: self._sort_file_tree("modified"))
-        self.file_tree.column("path", width=420, anchor="w")
+        self.file_tree.column("#0", width=420, anchor="w")
         self.file_tree.column("size", width=100, anchor="e")
         self.file_tree.column("modified", width=170, anchor="w")
         self.file_tree.bind("<<TreeviewSelect>>", self.on_file_select)
+        self.file_tree.bind("<Double-1>", self.on_file_double_click)
         self.file_tree.bind("<Button-3>", self.show_file_context_menu)
         self.file_tree.pack(fill="both", expand=True)
 
@@ -127,12 +147,16 @@ class DocumentTrackerApp:
         self.file_context_menu.add_command(label="Open File", command=self.open_file)
         self.file_context_menu.add_command(label="Rename File", command=self.rename_file)
         self.file_context_menu.add_separator()
-        self.file_context_menu.add_command(label="Delete File", command=self.delete_file)
+        self.file_context_menu.add_command(label="Remove File/Folder", command=self.remove_item)
 
         file_buttons = ttk.Frame(center_frame)
         file_buttons.pack(fill="x", pady=(8, 0))
-        ttk.Button(file_buttons, text="Add Files", command=self.add_files).pack(side="left")
-        ttk.Button(file_buttons, text="Refresh", command=self.refresh_files).pack(side="left", padx=(4, 0))
+        self.add_files_button = ttk.Button(file_buttons, text="Add Files", command=self.add_files)
+        self.add_files_button.pack(side="left")
+        self.add_folder_button = ttk.Button(file_buttons, text="Add Folder", command=self.add_folder)
+        self.add_folder_button.pack(side="left", padx=(4, 0))
+        self.back_button = ttk.Button(file_buttons, text="Back", command=self.go_back_folder)
+        self.back_button.pack(side="left", padx=(4, 0))
 
         detail_label = ttk.Label(right_frame, text="File Details")
         detail_label.pack(anchor="w")
@@ -144,7 +168,8 @@ class DocumentTrackerApp:
         self.history_text.pack(fill="x", expand=False)
         history_button_frame = ttk.Frame(right_frame)
         history_button_frame.pack(fill="x", pady=(8, 0))
-        ttk.Button(history_button_frame, text="View as Text File", command=self.print_project_history).pack(side="right")
+        self.view_history_button = ttk.Button(history_button_frame, text="View as Text File", command=self.print_project_history)
+        self.view_history_button.pack(side="right")
 
         todo_label = ttk.Label(right_frame, text="Project Notes")
         todo_label.pack(anchor="w", pady=(10, 0))
@@ -152,8 +177,11 @@ class DocumentTrackerApp:
         self.todo_listbox.pack(fill="both", expand=True, pady=(4, 0))
         todo_buttons_frame = ttk.Frame(right_frame)
         todo_buttons_frame.pack(fill="x", pady=(4, 0))
-        ttk.Button(todo_buttons_frame, text="Add Note", command=self.add_todo_item).pack(side="left")
-        ttk.Button(todo_buttons_frame, text="Remove Selected", command=self.remove_todo_item).pack(side="left", padx=(4, 0))
+        self.add_note_button = ttk.Button(todo_buttons_frame, text="Add Note", command=self.add_todo_item)
+        self.add_note_button.pack(side="left")
+        self.remove_note_button = ttk.Button(todo_buttons_frame, text="Remove Selected", command=self.remove_todo_item)
+        self.remove_note_button.pack(side="left", padx=(4, 0))
+        self._update_file_action_buttons_state()
 
     def refresh_projects(self) -> None:
         self.project_tree.delete(*self.project_tree.get_children())
@@ -186,7 +214,7 @@ class DocumentTrackerApp:
     def show_about(self) -> None:
         messagebox.showinfo(
             "About",
-            f"Project File Manager\nVersion {APP_VERSION}\n\nA desktop application for organizing and tracking local project folders, files, change history, notes, and tasks — all stored locally with no internet required.\n\nDeveloper: Bejon Minada\n\nMain repository folder:\n{self.repository_folder}",
+            f"Project File Manager\nVersion {APP_VERSION}\n\nA desktop application for organizing and tracking local project folders, files, change history, notes, and tasks, all stored locally with no internet required.\n\nDeveloper: Bejon Minada\n\nMain repository folder:\n{self.repository_folder}",
         )
 
     def reset_all_data(self) -> None:
@@ -227,10 +255,18 @@ class DocumentTrackerApp:
                 self.csv.write_rows(table, [])
             self.selected_project = None
             self.selected_file = None
+            self.current_folder_rel = ""
+            self.selected_item_kind = ""
+            self.selected_item_rel = ""
             self.projects = []
             self.tracked_files = []
+            self.project_todos.clear()
             self.refresh_projects()
             self.refresh_files()
+            self.history_text.config(state="normal")
+            self.history_text.delete("1.0", tk.END)
+            self.history_text.config(state="disabled")
+            self.todo_listbox.delete(0, tk.END)
 
         ttk.Button(button_frame, text="Reset", command=do_reset).pack(side="left", padx=(0, 8))
         ttk.Button(button_frame, text="Cancel", command=confirm_dialog.destroy).pack(side="left")
@@ -240,12 +276,16 @@ class DocumentTrackerApp:
         selection = self.project_tree.selection()
         if not selection:
             self.selected_project = None
+            self.current_folder_rel = ""
+            self._update_file_action_buttons_state()
             return
         project_id = selection[0]
         self.selected_project = next((p for p in self.projects if p.project_id == project_id), None)
         if self.selected_project:
+            self.current_folder_rel = ""
             self._sync_untracked_files()
             self._load_project_todos()
+            self._update_file_action_buttons_state()
         self.refresh_files()
         self._show_history()
 
@@ -349,6 +389,55 @@ class DocumentTrackerApp:
             self.csv.append_row("files", tracked.to_dict())
         self.refresh_files()
 
+    def add_folder(self) -> None:
+        if not self.selected_project:
+            messagebox.showwarning("Select project", "Please select a project first.")
+            return
+        project_root = Path(self.selected_project.root_path).resolve()
+        selected_folder = filedialog.askdirectory(
+            title="Select folder to add",
+            initialdir=project_root,
+        )
+        if not selected_folder:
+            return
+
+        source_folder = Path(selected_folder).resolve()
+        if not source_folder.exists() or not source_folder.is_dir():
+            messagebox.showerror("Invalid folder", "Selected folder does not exist.")
+            return
+
+        # If folder is already inside the project, just sync tracking.
+        try:
+            source_folder.relative_to(project_root)
+            self._sync_untracked_files()
+            self.refresh_files()
+            return
+        except ValueError:
+            pass
+
+        destination_folder = project_root / source_folder.name
+        if destination_folder.exists():
+            overwrite = messagebox.askyesno(
+                "Folder exists",
+                f"The folder '{source_folder.name}' already exists in this project. Overwrite it?",
+            )
+            if not overwrite:
+                return
+            try:
+                shutil.rmtree(destination_folder)
+            except Exception as exc:
+                messagebox.showerror("Copy failed", f"Could not replace existing folder: {exc}")
+                return
+
+        try:
+            shutil.copytree(source_folder, destination_folder)
+        except Exception as exc:
+            messagebox.showerror("Copy failed", f"Unable to add folder: {exc}")
+            return
+
+        self._sync_untracked_files()
+        self.refresh_files()
+
     def _compute_file_checksum(self, path: Path) -> str:
         from file_scanner import compute_checksum
         return compute_checksum(path)
@@ -419,6 +508,7 @@ class DocumentTrackerApp:
         self.details_text.delete("1.0", tk.END)
         self.details_text.config(state="disabled")
         if not self.selected_project:
+            self._update_file_action_buttons_state()
             return
         self._sync_untracked_files()
         files = [TrackedFile.from_dict(row) for row in self.csv.read_rows("files") if row.get("project_id") == self.selected_project.project_id]
@@ -427,32 +517,236 @@ class DocumentTrackerApp:
         self.extension_combo['values'] = [""] + extensions
         selected_ext = self.extension_combo.get().strip().lower()
         search_terms = [term for term in self.search_entry.get().strip().lower().split() if term]
-        for file in files:
-            if search_terms and not all(term in file.relative_path.lower() for term in search_terms):
+        project_root = Path(self.selected_project.root_path).resolve()
+        current_dir = project_root / Path(self.current_folder_rel) if self.current_folder_rel else project_root
+        if not current_dir.exists() or not current_dir.is_dir():
+            self.current_folder_rel = ""
+            current_dir = project_root
+
+        tracked_by_rel = {file.relative_path: file for file in files}
+        for item_path in sorted(current_dir.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
+            relative = str(item_path.relative_to(project_root)).replace("\\", "/")
+            item_name = item_path.name
+
+            if search_terms and not all(term in relative.lower() for term in search_terms):
                 continue
-            if selected_ext and file.extension.lower() != selected_ext:
+
+            if item_path.is_dir():
+                self.file_tree.insert("", "end", iid=f"folder::{relative}", text=item_name, image=self.tree_folder_icon, values=("", ""))
                 continue
-            formatted_modified = self._format_datetime_readable(file.last_modified)
-            self.file_tree.insert("", "end", iid=file.file_id, values=(file.relative_path, file.file_size, formatted_modified))
+
+            tracked = tracked_by_rel.get(relative)
+            extension = (tracked.extension if tracked else item_path.suffix.lower()) or ""
+            if selected_ext and extension.lower() != selected_ext:
+                continue
+            file_size = tracked.file_size if tracked else item_path.stat().st_size
+            modified = tracked.last_modified if tracked else datetime.fromtimestamp(item_path.stat().st_mtime).isoformat()
+            formatted_modified = self._format_datetime_readable(modified)
+            self.file_tree.insert(
+                "",
+                "end",
+                iid=f"file::{relative}",
+                text=item_name,
+                image=self._icon_for_extension(extension),
+                values=(file_size, formatted_modified),
+            )
         self.selected_file = None
+        self.selected_item_kind = ""
+        self.selected_item_rel = ""
+        self._update_file_action_buttons_state()
         self._update_file_command_state()
 
     def on_file_select(self, event: object) -> None:
         selection = self.file_tree.selection()
         if not selection or not self.selected_project:
             self.selected_file = None
+            self.selected_item_kind = ""
+            self.selected_item_rel = ""
             self._update_file_command_state()
             return
         if len(selection) == 1:
-            file_id = selection[0]
-            self.selected_file = next((f for f in self.tracked_files if f.file_id == file_id), None)
-            self._show_file_details()
-            self._show_history()
+            selected_iid = selection[0]
+            if selected_iid.startswith("file::"):
+                relative = selected_iid.split("::", 1)[1]
+                self.selected_item_kind = "file"
+                self.selected_item_rel = relative
+                self.selected_file = next((f for f in self.tracked_files if f.relative_path == relative), None)
+                self._show_file_details()
+                self._show_history()
+            else:
+                self.selected_item_kind = "folder"
+                self.selected_item_rel = selected_iid.split("::", 1)[1]
+                self.selected_file = None
+                self.details_text.config(state="normal")
+                self.details_text.delete("1.0", tk.END)
+                self.details_text.insert(tk.END, f"Folder: {self.selected_item_rel}\n")
+                self.details_text.config(state="disabled")
+                self._show_history()
         else:
             self.selected_file = None
+            self.selected_item_kind = ""
+            self.selected_item_rel = ""
             self.details_text.delete("1.0", tk.END)
             self.history_text.delete("1.0", tk.END)
         self._update_file_command_state()
+
+    def on_file_double_click(self, event: object) -> None:
+        row_id = self.file_tree.identify_row(event.y)
+        if not row_id:
+            return
+        if row_id.startswith("folder::"):
+            self.current_folder_rel = row_id.split("::", 1)[1]
+            self.refresh_files()
+
+    def go_back_folder(self) -> None:
+        if not self.current_folder_rel:
+            return
+        current = Path(self.current_folder_rel)
+        parent = current.parent
+        self.current_folder_rel = "" if str(parent) == "." else str(parent).replace("\\", "/")
+        self.refresh_files()
+
+    def _create_folder_icon(self, body_color: str, tab_color: str) -> tk.PhotoImage:
+        icon = tk.PhotoImage(width=14, height=14)
+        icon.put(body_color, to=(1, 5, 12, 12))
+        icon.put(tab_color, to=(1, 3, 8, 6))
+        icon.put("#b38a1e", to=(1, 5, 12, 5))
+        return icon
+
+    def _create_zip_folder_icon(self) -> tk.PhotoImage:
+        icon = self._create_folder_icon("#d9b86b", "#c29c4f")
+        # Zipper teeth in the center for compressed archives.
+        icon.put("#616161", to=(6, 5, 7, 12))
+        icon.put("#f5f5f5", to=(6, 6, 7, 6))
+        icon.put("#f5f5f5", to=(6, 8, 7, 8))
+        icon.put("#f5f5f5", to=(6, 10, 7, 10))
+        return icon
+
+    def _create_file_icon(self, accent_color: str, style: str) -> tk.PhotoImage:
+        icon = tk.PhotoImage(width=14, height=14)
+        icon.put("#f8f9fa", to=(2, 1, 11, 12))
+        icon.put("#b0b0b0", to=(2, 1, 11, 1))
+        icon.put("#b0b0b0", to=(2, 12, 11, 12))
+        icon.put("#b0b0b0", to=(2, 1, 2, 12))
+        icon.put("#b0b0b0", to=(11, 1, 11, 12))
+        icon.put("#e9ecef", to=(9, 1, 11, 3))
+        icon.put("#c7c7c7", to=(9, 3, 11, 3))
+        icon.put(accent_color, to=(3, 3, 8, 4))
+
+        if style == "text":
+            icon.put("#6c757d", to=(3, 6, 10, 6))
+            icon.put("#6c757d", to=(3, 8, 10, 8))
+            icon.put("#6c757d", to=(3, 10, 9, 10))
+        elif style == "markdown":
+            icon.put("#1d3557", to=(3, 6, 10, 6))
+            icon.put("#1d3557", to=(3, 7, 4, 10))
+            icon.put("#1d3557", to=(6, 7, 7, 10))
+            icon.put("#1d3557", to=(9, 7, 10, 10))
+        elif style == "doc":
+            icon.put("#1565c0", to=(3, 6, 4, 10))
+            icon.put("#1565c0", to=(5, 6, 9, 6))
+            icon.put("#1565c0", to=(5, 8, 9, 8))
+            icon.put("#1565c0", to=(5, 10, 9, 10))
+        elif style == "sheet":
+            icon.put("#2e7d32", to=(3, 6, 10, 10))
+            icon.put("#e8f5e9", to=(4, 7, 9, 9))
+            icon.put("#2e7d32", to=(6, 7, 6, 9))
+            icon.put("#2e7d32", to=(4, 8, 9, 8))
+        elif style == "slide":
+            icon.put("#ef6c00", to=(3, 6, 10, 10))
+            icon.put("#fff3e0", to=(4, 7, 9, 9))
+            icon.put("#ef6c00", to=(4, 10, 9, 10))
+        elif style == "python":
+            icon.put("#306998", to=(3, 6, 7, 8))
+            icon.put("#ffd43b", to=(6, 8, 10, 10))
+        elif style == "pdf":
+            icon.put("#d62828", to=(3, 6, 10, 10))
+            icon.put("#ffffff", to=(5, 7, 8, 9))
+        elif style == "image":
+            icon.put("#e9c46a", to=(3, 10, 10, 10))
+            icon.put("#2a9d8f", to=(4, 8, 6, 10))
+            icon.put("#264653", to=(6, 7, 10, 10))
+        elif style == "audio":
+            icon.put("#6a4c93", to=(4, 6, 4, 10))
+            icon.put("#6a4c93", to=(6, 7, 6, 9))
+            icon.put("#6a4c93", to=(8, 6, 8, 10))
+        elif style == "video":
+            icon.put("#9c27b0", to=(3, 6, 10, 10))
+            icon.put("#ffffff", to=(6, 7, 7, 9))
+            icon.put("#ffffff", to=(8, 8, 8, 8))
+        elif style == "csv":
+            icon.put("#2f9e44", to=(3, 6, 10, 10))
+            icon.put("#e8f5e9", to=(4, 7, 9, 9))
+            icon.put("#2f9e44", to=(6, 7, 6, 9))
+            icon.put("#2f9e44", to=(4, 8, 9, 8))
+        elif style == "json":
+            icon.put("#f08c00", to=(4, 6, 4, 10))
+            icon.put("#f08c00", to=(9, 6, 9, 10))
+            icon.put("#f08c00", to=(6, 7, 7, 9))
+        elif style == "xml":
+            icon.put("#c77dff", to=(4, 8, 5, 8))
+            icon.put("#c77dff", to=(8, 8, 9, 8))
+            icon.put("#c77dff", to=(6, 6, 7, 10))
+        else:
+            icon.put("#9e9e9e", to=(3, 7, 10, 7))
+            icon.put("#9e9e9e", to=(3, 9, 10, 9))
+        return icon
+
+    def _icon_for_extension(self, extension: str) -> tk.PhotoImage:
+        ext = extension.lower().strip()
+        if ext in {".py", ".pyw"}:
+            return self.tree_file_icons["python"]
+        if ext in {".txt", ".log", ".ini", ".cfg", ".conf", ".yaml", ".yml"}:
+            return self.tree_file_icons["text"]
+        if ext in {".md", ".rst"}:
+            return self.tree_file_icons["markdown"]
+        if ext in {".csv", ".tsv"}:
+            return self.tree_file_icons["csv"]
+        if ext in {".json"}:
+            return self.tree_file_icons["json"]
+        if ext in {".xml", ".html", ".htm"}:
+            return self.tree_file_icons["xml"]
+        if ext in {".pdf"}:
+            return self.tree_file_icons["pdf"]
+        if ext in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico"}:
+            return self.tree_file_icons["image"]
+        if ext in {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz"}:
+            return self.tree_file_icons["archive"]
+        if ext in {".doc", ".docx", ".odt"}:
+            return self.tree_file_icons["doc"]
+        if ext in {".xls", ".xlsx", ".ods"}:
+            return self.tree_file_icons["sheet"]
+        if ext in {".ppt", ".pptx", ".odp"}:
+            return self.tree_file_icons["slide"]
+        if ext in {".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a"}:
+            return self.tree_file_icons["audio"]
+        if ext in {".mp4", ".avi", ".mkv", ".mov", ".wmv", ".webm"}:
+            return self.tree_file_icons["video"]
+        return self.tree_file_icons["generic"]
+
+    def _update_file_action_buttons_state(self) -> None:
+        has_project = self.selected_project is not None
+        if has_project:
+            self.search_entry.state(["!disabled"])
+            self.extension_combo.state(["!disabled", "readonly"])
+            self.add_files_button.state(["!disabled"])
+            self.add_folder_button.state(["!disabled"])
+            self.view_history_button.state(["!disabled"])
+            self.add_note_button.state(["!disabled"])
+            self.remove_note_button.state(["!disabled"])
+        else:
+            self.search_entry.state(["disabled"])
+            self.extension_combo.state(["disabled"])
+            self.add_files_button.state(["disabled"])
+            self.add_folder_button.state(["disabled"])
+            self.view_history_button.state(["disabled"])
+            self.add_note_button.state(["disabled"])
+            self.remove_note_button.state(["disabled"])
+
+        if has_project and self.current_folder_rel:
+            self.back_button.state(["!disabled"])
+        else:
+            self.back_button.state(["disabled"])
 
     def _show_file_details(self) -> None:
         self.details_text.config(state="normal")
@@ -659,7 +953,10 @@ class DocumentTrackerApp:
         return f"{change_type} for file '{new_value or old_value or file_id}': {note}"
 
     def _sort_treeview(self, tree: ttk.Treeview, col: str, reverse: bool) -> bool:
-        items = [(self._tree_sort_key(tree.set(item, col), col), item) for item in tree.get_children("")]
+        if col == "path":
+            items = [(self._tree_sort_key(tree.item(item, "text"), col), item) for item in tree.get_children("")]
+        else:
+            items = [(self._tree_sort_key(tree.set(item, col), col), item) for item in tree.get_children("")]
         items.sort(key=lambda x: x[0], reverse=reverse)
         for index, (_, item) in enumerate(items):
             tree.move(item, "", index)
@@ -683,61 +980,6 @@ class DocumentTrackerApp:
 
     def _sort_file_tree(self, col: str) -> None:
         self.sort_state["files"][col] = self._sort_treeview(self.file_tree, col, self.sort_state["files"][col])
-
-    def _save_history_pdf(self, destination: str, title: str, lines: List[str]) -> None:
-        page_width = 595.28
-        page_height = 841.89
-        margin = 40
-        font_size = 12
-        line_height = 14
-        max_lines_per_page = int((page_height - 2 * margin - 40) // line_height)
-        pages = [lines[i:i + max_lines_per_page] for i in range(0, len(lines), max_lines_per_page)]
-
-        def pdf_escape(text: str) -> str:
-            return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-
-        objects = [b"1 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"]
-        page_refs = []
-        obj_id = 2
-
-        for page_lines in pages:
-            content_id = obj_id
-            obj_id += 1
-            bodies = ["BT", f"/F1 {font_size} Tf", f"{margin} {page_height - margin - font_size} Td"]
-            for line in page_lines:
-                bodies.append(f"({pdf_escape(line)}) Tj")
-                bodies.append("T*")
-            bodies.append("ET")
-            stream = "\n".join(bodies).encode("utf-8")
-            header = f"{content_id} 0 obj\n<< /Length {len(stream)} >>\nstream\n".encode("utf-8")
-            objects.append(header + stream + b"\nendstream\nendobj\n")
-
-            page_id = obj_id
-            page_refs.append(page_id)
-            objects.append(
-                f"{page_id} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width} {page_height}] /Contents {content_id} 0 R /Resources << /Font << /F1 0 0 R >> >> >>\nendobj\n".encode("utf-8")
-            )
-            obj_id += 1
-
-        kids = " ".join(f"{page_id} 0 R" for page_id in page_refs)
-        pages_object = f"2 0 obj\n<< /Type /Pages /Kids [{kids}] /Count {len(page_refs)} >>\nendobj\n".encode("utf-8")
-        objects.insert(1, pages_object)
-
-        with open(destination, "wb") as pdf_file:
-            pdf_file.write(b"%PDF-1.3\n")
-            offsets = [0]
-            position = len(b"%PDF-1.3\n")
-            for obj in objects:
-                offsets.append(position)
-                pdf_file.write(obj)
-                position += len(obj)
-            xref_position = position
-            pdf_file.write(f"xref\n0 {len(offsets)}\n".encode("utf-8"))
-            pdf_file.write(b"0000000000 65535 f \n")
-            for offset in offsets[1:]:
-                pdf_file.write(f"{offset:010d} 00000 n \n".encode("utf-8"))
-            pdf_file.write(f"trailer\n<< /Size {len(offsets)} /Root 2 0 R >>\nstartxref\n".encode("utf-8"))
-            pdf_file.write(f"{xref_position}\n%%EOF\n".encode("utf-8"))
 
     def print_project_history(self) -> None:
         if not self.selected_project:
@@ -931,40 +1173,67 @@ class DocumentTrackerApp:
         self.refresh_files()
         self._show_history()
 
-    def delete_file(self) -> None:
+    def remove_item(self) -> None:
         if not self.selected_project:
             return
         selection = self.file_tree.selection()
         if not selection:
             return
-        if not messagebox.askyesno("Delete files", f"Delete {len(selection)} selected file(s) from disk and tracking?"):
+        if not messagebox.askyesno("Remove items", f"Remove {len(selection)} selected item(s) from disk and tracking?"):
             return
+
+        project_root = Path(self.selected_project.root_path)
         file_rows = self.csv.read_rows("files")
-        delete_ids = set(selection)
+        delete_rel_paths: set[str] = set()
+        folder_rel_paths: list[str] = []
+
+        for selected_id in selection:
+            if selected_id.startswith("file::"):
+                delete_rel_paths.add(selected_id.split("::", 1)[1])
+            elif selected_id.startswith("folder::"):
+                folder_rel_paths.append(selected_id.split("::", 1)[1])
+
+        for folder_rel in folder_rel_paths:
+            folder_prefix = f"{folder_rel}/"
+            for row in file_rows:
+                rel = row.get("relative_path", "")
+                if rel == folder_rel or rel.startswith(folder_prefix):
+                    delete_rel_paths.add(rel)
+            folder_path = project_root / Path(folder_rel)
+            if folder_path.exists() and folder_path.is_dir():
+                try:
+                    shutil.rmtree(folder_path)
+                except Exception as exc:
+                    messagebox.showerror("Remove failed", f"Could not remove folder {folder_path}: {exc}")
+                    return
+
         updated_rows = []
         for row in file_rows:
-            if row.get("file_id") in delete_ids:
-                file_path = Path(self.selected_project.root_path) / Path(row.get("relative_path", ""))
+            rel_path = row.get("relative_path", "")
+            if rel_path in delete_rel_paths:
+                file_path = project_root / Path(rel_path)
                 if file_path.exists():
                     try:
                         file_path.unlink()
                     except Exception as exc:
-                        messagebox.showerror("Delete failed", f"Could not delete file {file_path}: {exc}")
+                        messagebox.showerror("Remove failed", f"Could not remove file {file_path}: {exc}")
                         return
                 change = ChangeRecord(
                     timestamp=datetime.now().isoformat(),
                     project_id=self.selected_project.project_id,
                     file_id=row.get("file_id", ""),
                     change_type="REMOVE",
-                    old_value=row.get("relative_path", ""),
+                    old_value=rel_path,
                     new_value="",
-                    note="Deleted file from project and tracking.",
+                    note="Removed item from project and tracking.",
                 )
                 self.csv.append_row("change_log", change.to_dict())
             else:
                 updated_rows.append(row)
         self.csv.write_rows("files", updated_rows)
         self.selected_file = None
+        self.selected_item_kind = ""
+        self.selected_item_rel = ""
         self.refresh_files()
 
     def delete_project_folder(self) -> None:
@@ -998,36 +1267,6 @@ class DocumentTrackerApp:
                 shutil.rmtree(project_root)
             except Exception as exc:
                 messagebox.showwarning("Delete folder", f"Could not delete folder on disk: {exc}")
-        self.selected_project = None
-        self.selected_file = None
-        self.refresh_projects()
-        self.refresh_files()
-
-    def remove_project(self) -> None:
-        if not self.selected_project:
-            messagebox.showwarning("Select project", "Please select a project first.")
-            return
-        if not messagebox.askyesno("Remove project", f"Remove project '{self.selected_project.project_name}' from tracking without deleting its folder?"):
-            return
-        project_id = self.selected_project.project_id
-        file_rows = self.csv.read_rows("files")
-        project_files = [row for row in file_rows if row.get("project_id") == project_id]
-        for row in project_files:
-            change = ChangeRecord(
-                timestamp=datetime.now().isoformat(),
-                project_id=project_id,
-                file_id=row.get("file_id", ""),
-                change_type="REMOVE",
-                old_value=row.get("relative_path", ""),
-                new_value="",
-                note="Project untracked without deleting folder.",
-            )
-            self.csv.append_row("change_log", change.to_dict())
-        remaining_files = [row for row in file_rows if row.get("project_id") != project_id]
-        self.csv.write_rows("files", remaining_files)
-        project_rows = self.csv.read_rows("projects")
-        remaining_projects = [row for row in project_rows if row.get("project_id") != project_id]
-        self.csv.write_rows("projects", remaining_projects)
         self.selected_project = None
         self.selected_file = None
         self.refresh_projects()
@@ -1075,45 +1314,80 @@ class DocumentTrackerApp:
             )
             self.csv.append_row("projects", project.to_dict())
 
-    def rescan_project(self) -> None:
-        if not self.selected_project:
-            messagebox.showwarning("Select project", "Please select a project first.")
-            return
-        root_folder = Path(self.selected_project.root_path)
-        if not root_folder.exists():
-            messagebox.showerror("Missing folder", "Project root folder does not exist.")
-            return
-        scanned = list(scan_project_files(root_folder))
-        tracked = [TrackedFile.from_dict(row) for row in self.csv.read_rows("files") if row.get("project_id") == self.selected_project.project_id]
-        changes = detect_changes(self.selected_project.project_id, tracked, scanned)
-        for record in changes:
-            self.csv.append_row("change_log", record.to_dict())
+    def refresh_repository(self) -> None:
+        """Refresh all repository projects and tracked file metadata globally."""
+        selected_project_id = self.selected_project.project_id if self.selected_project else None
 
-        file_rows = self.csv.read_rows("files")
-        scan_by_rel = {row["relative_path"]: row for row in scanned}
-        scan_by_checksum = {row["checksum"]: row for row in scanned}
-        for row in file_rows:
-            if row.get("project_id") != self.selected_project.project_id:
-                continue
-            relative = row.get("relative_path", "")
-            if relative in scan_by_rel:
-                current = scan_by_rel[relative]
-            elif row.get("checksum") in scan_by_checksum:
-                current = scan_by_checksum[row.get("checksum")]
-            else:
-                continue
-            row["relative_path"] = current["relative_path"]
-            row["extension"] = current["extension"]
-            row["file_size"] = current["file_size"]
-            row["last_modified"] = current["last_modified"]
-            row["checksum"] = current["checksum"]
-        self.csv.write_rows("files", file_rows)
-
+        self._auto_sync_repository()
         project_rows = self.csv.read_rows("projects")
-        for row in project_rows:
-            if row["project_id"] == self.selected_project.project_id:
-                row["last_scanned_date"] = datetime.now().isoformat()
+        all_file_rows = self.csv.read_rows("files")
+        updated_all_rows: List[dict] = []
+
+        max_file_id = 0
+        for row in all_file_rows:
+            try:
+                max_file_id = max(max_file_id, int(row.get("file_id", "0")))
+            except ValueError:
+                continue
+
+        for project_row in project_rows:
+            project_id = project_row.get("project_id", "")
+            root_folder = Path(project_row.get("root_path", ""))
+            if not root_folder.exists() or not root_folder.is_dir():
+                continue
+
+            scanned = list(scan_project_files(root_folder))
+            tracked_rows = [row for row in all_file_rows if row.get("project_id") == project_id]
+            tracked = [TrackedFile.from_dict(row) for row in tracked_rows]
+            changes = detect_changes(project_id, tracked, scanned)
+            for record in changes:
+                self.csv.append_row("change_log", record.to_dict())
+
+            scan_by_rel = {row["relative_path"]: row for row in scanned}
+            scan_by_checksum = {row["checksum"]: row for row in scanned}
+            project_updated_rows: List[dict] = []
+
+            for row in tracked_rows:
+                relative = row.get("relative_path", "")
+                checksum = row.get("checksum", "")
+                current = scan_by_rel.get(relative) or scan_by_checksum.get(checksum)
+                if not current:
+                    continue
+                row["relative_path"] = current["relative_path"]
+                row["extension"] = current["extension"]
+                row["file_size"] = current["file_size"]
+                row["last_modified"] = current["last_modified"]
+                row["checksum"] = current["checksum"]
+                project_updated_rows.append(row)
+
+            existing_paths = {row.get("relative_path", "") for row in project_updated_rows}
+            for row in scanned:
+                rel_path = row["relative_path"]
+                if rel_path in existing_paths:
+                    continue
+                max_file_id += 1
+                project_updated_rows.append({
+                    "file_id": str(max_file_id),
+                    "project_id": project_id,
+                    "relative_path": rel_path,
+                    "extension": row["extension"],
+                    "file_size": row["file_size"],
+                    "last_modified": row["last_modified"],
+                    "checksum": row["checksum"],
+                    "notes": "",
+                })
+
+            project_row["last_scanned_date"] = datetime.now().isoformat()
+            updated_all_rows.extend(project_updated_rows)
+
+        self.csv.write_rows("files", updated_all_rows)
         self.csv.write_rows("projects", project_rows)
+
         self.refresh_projects()
-        self.refresh_files()
-        self._show_history()
+        if selected_project_id and any(row.get("project_id") == selected_project_id for row in project_rows):
+            self.project_tree.selection_set(selected_project_id)
+            self.on_project_select(None)
+        else:
+            self.selected_project = None
+            self.current_folder_rel = ""
+            self.refresh_files()
