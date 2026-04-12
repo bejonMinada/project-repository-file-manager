@@ -1,4 +1,4 @@
-# Project File Manager 1.4
+# Project File Manager 2.0
 
 Project File Manager is a local desktop application for organizing project folders, tracking files, comparing revisions, restoring snapshots, and keeping project notes in a responsive Tkinter workspace.
 

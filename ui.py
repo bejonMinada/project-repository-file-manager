@@ -17,7 +17,7 @@ from csv_manager import CSVManager
 from file_scanner import compute_checksum, scan_project_files
 from models import ChangeRecord, Project, TrackedFile
 
-APP_VERSION = "1.4"
+APP_VERSION = "2.0"
 APP_SETTINGS_FILE = "app_settings.json"
 
 class DocumentTrackerApp:
@@ -67,11 +67,15 @@ class DocumentTrackerApp:
         self.selected_item_kind: str = ""
         self.selected_item_rel: str = ""
         self.pending_file_operation: Optional[dict[str, object]] = None
+        self.undo_stack: List[dict[str, object]] = []
         self.sort_state = {
             "projects": {"name": False, "tags": False},
             "files": {"path": False, "size": False, "modified": False},
         }
         self.project_todos: dict[str, List[dict]] = {}
+        self.project_tree_name_ratio = 0.68
+        self.file_tree_name_ratio = 0.62
+        self.file_tree_size_ratio = 0.14
         self.scale_factor = 1.0
         self.base_window_width = 1200
         self._build_ui()
@@ -100,17 +104,26 @@ class DocumentTrackerApp:
         self.data_actions_menu.add_command(label="Reset", command=self.reset_all_data)
         self.data_actions_button["menu"] = self.data_actions_menu
 
-        main_pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
-        main_pane.grid(row=1, column=0, sticky="nsew")
+        self.main_pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        self.main_pane.grid(row=1, column=0, sticky="nsew")
 
-        left_frame = ttk.Frame(main_pane, padding=(8, 8))
-        center_frame = ttk.Frame(main_pane, padding=(8, 8))
-        right_frame = ttk.Frame(main_pane, padding=(8, 8))
+        left_frame = ttk.Frame(self.main_pane, padding=(8, 8))
+        center_frame = ttk.Frame(self.main_pane, padding=(8, 8))
+        right_frame = ttk.Frame(self.main_pane, padding=(8, 8))
         right_frame.columnconfigure(0, weight=1)
         right_frame.rowconfigure(1, weight=1)
-        main_pane.add(left_frame, weight=1)
-        main_pane.add(center_frame, weight=6)
-        main_pane.add(right_frame, weight=1)
+        self.main_pane.add(left_frame, weight=1)
+        self.main_pane.add(center_frame, weight=4)
+        self.main_pane.add(right_frame, weight=1)
+        self.main_pane.bind("<Double-1>", self._on_main_pane_double_click)
+
+        def _set_initial_sash_positions() -> None:
+            total = self.main_pane.winfo_width()
+            side = total // 6          # ~1/6 of total for each side panel
+            self.main_pane.sashpos(0, side)
+            self.main_pane.sashpos(1, total - side)
+
+        self.root.after(0, _set_initial_sash_positions)
 
         project_label = ttk.Label(left_frame, text="Projects")
         project_label.pack(anchor="w")
@@ -124,13 +137,14 @@ class DocumentTrackerApp:
         self.project_tree = ttk.Treeview(left_frame, columns=("name", "tags"), show="headings", height=20)
         self.project_tree.heading("name", text="Project Name", command=lambda: self._sort_project_tree("name"))
         self.project_tree.heading("tags", text="Tags", command=lambda: self._sort_project_tree("tags"))
-        self.project_tree.column("name", width=220, anchor="w")
-        self.project_tree.column("tags", width=140, anchor="w")
-        self.project_tree_base_name_width = 220
-        self.project_tree_base_tags_width = 140
+        self.project_tree.column("name", width=120, anchor="w", stretch=False)
+        self.project_tree.column("tags", width=60, anchor="w", stretch=False)
         self.project_tree.bind("<<TreeviewSelect>>", self.on_project_select)
+        self.project_tree.bind("<Double-1>", self.on_project_tree_double_click)
         self.project_tree.bind("<Button-3>", self.show_project_context_menu)
+        self.project_tree.bind("<Configure>", lambda event: self._fit_project_tree_columns())
         self.project_tree.pack(fill="both", expand=True)
+        self.root.after(0, self._fit_project_tree_columns)
 
         self.project_context_menu = tk.Menu(self.root, tearoff=0)
         self.project_context_menu.add_command(label="Go To Folder", command=self.go_to_folder_directory)
@@ -172,7 +186,7 @@ class DocumentTrackerApp:
         self.file_tree.heading("size", text="Size", command=lambda: self._sort_file_tree("size"))
         self.file_tree.heading("modified", text="Last Modified", command=lambda: self._sort_file_tree("modified"))
         self.file_tree.column("#0", width=420, anchor="w")
-        self.file_tree.column("size", width=100, anchor="e")
+        self.file_tree.column("size", width=100, anchor="w")
         self.file_tree.column("modified", width=170, anchor="w")
         self.file_tree_base_name_width = 420
         self.file_tree_base_size_width = 100
@@ -180,7 +194,9 @@ class DocumentTrackerApp:
         self.file_tree.bind("<<TreeviewSelect>>", self.on_file_select)
         self.file_tree.bind("<Double-1>", self.on_file_double_click)
         self.file_tree.bind("<Button-3>", self.show_file_context_menu)
+        self.file_tree.bind("<Configure>", lambda event: self._fit_file_tree_columns())
         self.file_tree.pack(fill="both", expand=True)
+        self.root.after(0, self._fit_file_tree_columns)
 
         self.file_context_menu = tk.Menu(self.root, tearoff=0)
         self.file_context_menu.add_command(label="Add/Edit Notes", command=self.add_file_note)
@@ -206,6 +222,7 @@ class DocumentTrackerApp:
 
         self.dashboard_frame = ttk.Frame(right_frame)
         self.dashboard_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        self.dashboard_frame.bind("<Configure>", lambda event: self._update_dashboard())
 
         # Create scrollable canvas for content sections
         self.right_scroll_canvas = tk.Canvas(right_frame, highlightthickness=0)
@@ -291,6 +308,10 @@ class DocumentTrackerApp:
         self.todo_listbox = tk.Listbox(self.content_frame)
         self.todo_listbox_base_height = 10
         self.todo_listbox.pack(fill="both", expand=True, pady=(0, 4))
+        self.todo_listbox.bind("<Button-3>", self.show_todo_context_menu)
+        self.todo_context_menu = tk.Menu(self.root, tearoff=0)
+        self.todo_context_menu.add_command(label="Edit Note", command=self.edit_todo_item)
+        self.todo_context_menu.add_command(label="Remove Note", command=self.remove_todo_item)
         todo_buttons_frame = ttk.Frame(self.content_frame)
         todo_buttons_frame.pack(fill="x", pady=(0, 0))
         self.add_note_button = ttk.Button(todo_buttons_frame, text="Add Note", command=self.add_todo_item)
@@ -442,9 +463,45 @@ class DocumentTrackerApp:
         dialog.wait_window()
 
     def show_about(self) -> None:
+        about_text = (
+            f"Project File Manager\n"
+            f"Version {APP_VERSION}\n\n"
+            "Overview\n"
+            "A local first desktop application for organizing project folders, tracking file changes, comparing revisions, "
+            "restoring snapshots, and managing notes. The repository can be set to local folders or cloud synced folders such as OneDrive, SharePoint synced libraries, and similar services.\n\n"
+            "Latest Functions\n"
+            "- Configurable repository location in Settings\n"
+            "- Data Actions menu for Backup, Import, and Reset\n"
+            "- Automatic runtime folder creation on startup\n"
+            "- Compare and restore previous file revisions\n"
+            "- Queue based copy and move for selected files and folders\n"
+            "- Right click empty space to create new files or folders\n"
+            "- Dynamic column resizing and double click auto fit behavior\n"
+            "- Recycle bin and snapshot support for safer operations\n\n"
+            "User Guide\n"
+            "1. Create or select a project in the Projects panel.\n"
+            "2. Add files or folders to track in Tracked Files.\n"
+            "3. Open folders by double clicking folder rows, then press Back or Backspace to go up one level.\n"
+            "4. Use right click on a file for rename, notes, compare, restore, copy, move, or remove.\n"
+            "5. Use right click on empty space to paste, create a new file, or create a new folder.\n"
+            "6. Use Data Actions for backup, import, and full reset.\n"
+            "7. Use Settings to change the repository location.\n\n"
+            "Keyboard Shortcuts\n"
+            "- Ctrl+F: focus file search\n"
+            "- Ctrl+N: add project\n"
+            "- Ctrl+C: copy selected file or folder\n"
+            "- Ctrl+X: cut selected file or folder\n"
+            "- Ctrl+V: paste queued items into current folder\n"
+            "- Ctrl+Z: undo last supported file operation\n"
+            "- Delete: remove selected file or folder\n"
+            "- Backspace: go to parent folder\n"
+            "- F5: refresh repository\n\n"
+            "Developer: Bejon Minada\n\n"
+            f"Main repository folder:\n{self.repository_folder}"
+        )
         messagebox.showinfo(
             "About",
-            f"Project File Manager\nVersion {APP_VERSION}\n\nA local desktop application for organizing project folders, tracking file changes, comparing revisions, restoring snapshots, and managing project notes in a responsive workspace. All data stays on the device with no cloud dependency.\n\nDeveloper: Bejon Minada\n\nMain repository folder:\n{self.repository_folder}",
+            about_text,
         )
 
     def reset_all_data(self) -> None:
@@ -851,13 +908,40 @@ class DocumentTrackerApp:
             self.history_text.delete("1.0", tk.END)
             self.history_text.config(state="disabled")
 
-    def on_file_double_click(self, event: object) -> None:
+    def on_project_tree_double_click(self, event: tk.Event) -> str | None:
+        region = self.project_tree.identify_region(event.x, event.y)
+        if region == "separator":
+            self._reset_project_tree_columns_to_default()
+            return "break"
+        if region in {"heading", "cell"}:
+            column_id = self.project_tree.identify_column(event.x)
+            self._autofit_treeview_column(self.project_tree, column_id, min_width=60)
+            return "break"
+        return None
+
+    def on_file_double_click(self, event: tk.Event) -> str | None:
+        region = self.file_tree.identify_region(event.x, event.y)
+        if region == "separator":
+            self._reset_file_tree_columns_to_default()
+            return "break"
+
+        column_id = self.file_tree.identify_column(event.x)
         row_id = self.file_tree.identify_row(event.y)
-        if not row_id:
-            return
-        if row_id.startswith("folder::"):
-            self.current_folder_rel = row_id.split("::", 1)[1]
-            self.refresh_files()
+        if row_id and column_id == "#0":
+            self.file_tree.selection_set(row_id)
+            self.on_file_select(event)
+            if row_id.startswith("folder::"):
+                self.current_folder_rel = row_id.split("::", 1)[1]
+                self.refresh_files()
+                return "break"
+            if row_id.startswith("file::"):
+                self.open_file()
+                return "break"
+
+        if region in {"heading", "cell", "tree"}:
+            self._autofit_treeview_column(self.file_tree, column_id, min_width=70)
+            return "break"
+        return None
 
     def go_back_folder(self) -> None:
         if not self.current_folder_rel:
@@ -1117,6 +1201,53 @@ class DocumentTrackerApp:
         self._load_project_todos()
         self._show_project_todos()
 
+    def edit_todo_item(self) -> None:
+        if not self.selected_project:
+            return
+        selection = self.todo_listbox.curselection()
+        if not selection:
+            return
+        index = selection[0]
+        todos = self.project_todos.get(self.selected_project.project_id, [])
+        if not (0 <= index < len(todos)):
+            return
+
+        todo_id = todos[index].get("todo_id")
+        current_text = todos[index].get("description", "")
+        new_text = simpledialog.askstring("Edit Note", "Update selected note:", initialvalue=current_text, parent=self.root)
+        if new_text is None:
+            return
+
+        updated_text = new_text.strip()
+        if not updated_text:
+            messagebox.showwarning("Edit Note", "Note text cannot be empty.")
+            return
+
+        all_todos = self.csv.read_rows("todos")
+        for row in all_todos:
+            if row.get("project_id") == self.selected_project.project_id and row.get("todo_id") == todo_id:
+                row["description"] = updated_text
+                break
+        self.csv.write_rows("todos", all_todos)
+        self._load_project_todos()
+        self._show_project_todos()
+
+    def show_todo_context_menu(self, event: tk.Event) -> str | None:
+        if not self.selected_project:
+            return None
+        index = self.todo_listbox.nearest(event.y)
+        if index < 0 or index >= self.todo_listbox.size():
+            return None
+        self.todo_listbox.selection_clear(0, tk.END)
+        self.todo_listbox.selection_set(index)
+        self.todo_listbox.activate(index)
+        self.todo_listbox.focus_set()
+        try:
+            self.todo_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.todo_context_menu.grab_release()
+        return "break"
+
     def add_file_note(self) -> None:
         if not self.selected_project or not self.selected_file:
             return
@@ -1189,21 +1320,173 @@ class DocumentTrackerApp:
             self.file_context_menu.grab_release()
 
     def _show_file_destination_menu(self, event: object) -> None:
-        if not self.selected_project or not self.pending_file_operation:
+        if not self.selected_project:
             return
-        if self.pending_file_operation.get("project_id") != self.selected_project.project_id:
-            self.pending_file_operation = None
-            return
-        operation = str(self.pending_file_operation.get("operation", ""))
-        if operation not in {"copy", "move"}:
-            return
+
         self.file_destination_menu.delete(0, tk.END)
-        label = "Copy Here" if operation == "copy" else "Move Here"
-        self.file_destination_menu.add_command(label=label, command=self.paste_pending_items_here)
+
+        if self.pending_file_operation and self.pending_file_operation.get("project_id") != self.selected_project.project_id:
+            self.pending_file_operation = None
+
+        if self.pending_file_operation:
+            operation = str(self.pending_file_operation.get("operation", ""))
+            if operation in {"copy", "move"}:
+                label = "Copy Here" if operation == "copy" else "Move Here"
+                self.file_destination_menu.add_command(label=label, command=self.paste_pending_items_here)
+                self.file_destination_menu.add_separator()
+
+        self.file_destination_menu.add_command(label="Create New File...", command=self.create_new_file)
+        self.file_destination_menu.add_command(label="Create New Folder...", command=self.create_new_folder)
+
         try:
             self.file_destination_menu.tk_popup(event.x_root, event.y_root)
         finally:
             self.file_destination_menu.grab_release()
+
+    def create_new_file(self) -> None:
+        if not self.selected_project:
+            messagebox.showwarning("Select project", "Please select a project first.")
+            return
+
+        project_root = Path(self.selected_project.root_path)
+        target_dir = project_root / Path(self.current_folder_rel) if self.current_folder_rel else project_root
+        form = tk.Toplevel(self.root)
+        form.title("Create New File")
+        form.transient(self.root)
+        form.grab_set()
+        form.geometry("560x190")
+
+        ttk.Label(form, text="File name:").pack(anchor="w", padx=12, pady=(12, 4))
+        name_entry = ttk.Entry(form)
+        name_entry.pack(fill="x", padx=12)
+        name_entry.focus_set()
+
+        ttk.Label(form, text="Extension (example: txt or .txt):").pack(anchor="w", padx=12, pady=(10, 4))
+        ext_entry = ttk.Entry(form)
+        ext_entry.pack(fill="x", padx=12)
+        location_text = f"Location: /{self.current_folder_rel}" if self.current_folder_rel else "Location: /"
+        ttk.Label(form, text=location_text).pack(anchor="w", padx=12, pady=(10, 0))
+
+        button_row = ttk.Frame(form)
+        button_row.pack(fill="x", padx=12, pady=(14, 12))
+
+        def create_file() -> None:
+            base_name = name_entry.get().strip()
+            ext = ext_entry.get().strip()
+
+            if not base_name:
+                messagebox.showwarning("Missing name", "Please enter a file name.", parent=form)
+                return
+
+            if ext and not ext.startswith("."):
+                ext = f".{ext}"
+
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target_path = target_dir / f"{base_name}{ext}"
+
+            if target_path.exists():
+                messagebox.showwarning("Already exists", "A file with that name already exists in the target folder.", parent=form)
+                return
+
+            try:
+                target_path.touch()
+            except Exception as exc:
+                messagebox.showerror("Create failed", f"Could not create file: {exc}", parent=form)
+                return
+
+            relative = str(target_path.relative_to(project_root)).replace("\\", "/")
+            tracked = TrackedFile(
+                file_id=self.csv.next_id("files", "file_id"),
+                project_id=self.selected_project.project_id,
+                relative_path=relative,
+                extension=target_path.suffix.lower(),
+                file_size=target_path.stat().st_size,
+                last_modified=datetime.fromtimestamp(target_path.stat().st_mtime).isoformat(),
+                checksum=compute_checksum(target_path),
+                notes="",
+            )
+            self.csv.append_row("files", tracked.to_dict())
+            self.csv.append_row("change_log", ChangeRecord(
+                timestamp=datetime.now().isoformat(),
+                project_id=self.selected_project.project_id,
+                file_id=tracked.file_id,
+                change_type="ADD",
+                old_value="",
+                new_value=relative,
+                note="Created new file from context menu.",
+            ).to_dict())
+            self._save_snapshot_for_file(self.selected_project.project_id, target_path, relative)
+            self.refresh_files()
+            self._show_history()
+            form.destroy()
+
+        ttk.Button(button_row, text="Create", command=create_file).pack(side="right")
+        ttk.Button(button_row, text="Cancel", command=form.destroy).pack(side="right", padx=(0, 8))
+        form.wait_window()
+
+    def create_new_folder(self) -> None:
+        if not self.selected_project:
+            messagebox.showwarning("Select project", "Please select a project first.")
+            return
+
+        project_root = Path(self.selected_project.root_path)
+        target_parent = project_root / Path(self.current_folder_rel) if self.current_folder_rel else project_root
+
+        form = tk.Toplevel(self.root)
+        form.title("Create New Folder")
+        form.transient(self.root)
+        form.grab_set()
+        form.geometry("560x170")
+
+        ttk.Label(form, text="Folder name:").pack(anchor="w", padx=12, pady=(12, 4))
+        folder_name_entry = ttk.Entry(form)
+        folder_name_entry.pack(fill="x", padx=12)
+        folder_name_entry.focus_set()
+
+        location_text = f"Location: /{self.current_folder_rel}" if self.current_folder_rel else "Location: /"
+        ttk.Label(form, text=location_text).pack(anchor="w", padx=12, pady=(10, 0))
+
+        button_row = ttk.Frame(form)
+        button_row.pack(fill="x", padx=12, pady=(14, 12))
+
+        def create_folder() -> None:
+            folder_name = folder_name_entry.get().strip()
+            if not folder_name:
+                messagebox.showwarning("Missing name", "Please enter a folder name.", parent=form)
+                return
+            if any(char in folder_name for char in "\\/:*?\"<>|"):
+                messagebox.showwarning("Invalid name", "Folder name contains invalid characters.", parent=form)
+                return
+
+            folder_path = target_parent / folder_name
+            if folder_path.exists():
+                messagebox.showwarning("Already exists", "A folder with that name already exists.", parent=form)
+                return
+
+            try:
+                folder_path.mkdir(parents=True, exist_ok=False)
+            except Exception as exc:
+                messagebox.showerror("Create failed", f"Could not create folder: {exc}", parent=form)
+                return
+
+            relative = str(folder_path.relative_to(project_root)).replace("\\", "/")
+            self.csv.append_row("change_log", ChangeRecord(
+                timestamp=datetime.now().isoformat(),
+                project_id=self.selected_project.project_id,
+                file_id="",
+                change_type="META_UPDATE",
+                old_value="",
+                new_value=relative,
+                note="Created new folder from context menu.",
+            ).to_dict())
+
+            self.refresh_files()
+            self._show_history()
+            form.destroy()
+
+        ttk.Button(button_row, text="Create", command=create_folder).pack(side="right")
+        ttk.Button(button_row, text="Cancel", command=form.destroy).pack(side="right", padx=(0, 8))
+        form.wait_window()
 
     def _selected_file_tree_items(self) -> List[tuple[str, str]]:
         items: List[tuple[str, str]] = []
@@ -1250,6 +1533,7 @@ class DocumentTrackerApp:
         items = list(self.pending_file_operation.get("items", []))
         completed = 0
         skipped: List[str] = []
+        undo_items: List[dict[str, str]] = []
 
         for kind, relative_path in items:
             source_path = project_root / Path(relative_path)
@@ -1283,6 +1567,19 @@ class DocumentTrackerApp:
                         shutil.copy2(source_path, target_path)
                     else:
                         shutil.move(str(source_path), str(target_path))
+                if operation == "copy":
+                    undo_items.append({
+                        "operation": "copy",
+                        "kind": kind,
+                        "target": str(target_path),
+                    })
+                else:
+                    undo_items.append({
+                        "operation": "move",
+                        "kind": kind,
+                        "source": str(source_path),
+                        "target": str(target_path),
+                    })
                 completed += 1
             except Exception as exc:
                 skipped.append(f"{relative_path}: {exc}")
@@ -1290,6 +1587,12 @@ class DocumentTrackerApp:
         if completed:
             if operation == "move":
                 self.pending_file_operation = None
+            if undo_items:
+                self.undo_stack.append({
+                    "type": "paste",
+                    "project_id": self.selected_project.project_id,
+                    "items": undo_items,
+                })
             self.refresh_repository()
 
         if skipped:
@@ -1746,6 +2049,12 @@ class DocumentTrackerApp:
             note="Renamed file inside application.",
         )
         self.csv.append_row("change_log", change.to_dict())
+        self.undo_stack.append({
+            "type": "rename",
+            "project_id": self.selected_project.project_id,
+            "source": str(current_path),
+            "target": str(new_path),
+        })
         self.refresh_files()
         self._show_history()
 
@@ -1762,6 +2071,8 @@ class DocumentTrackerApp:
         file_rows = self.csv.read_rows("files")
         delete_rel_paths: set[str] = set()
         folder_rel_paths: list[str] = []
+        recycle_moves: List[dict[str, str]] = []
+        removed_rows: List[dict] = []
 
         for selected_id in selection:
             if selected_id.startswith("file::"):
@@ -1778,7 +2089,8 @@ class DocumentTrackerApp:
             folder_path = project_root / Path(folder_rel)
             if folder_path.exists() and folder_path.is_dir():
                 try:
-                    self._move_to_recycle(folder_path)
+                    recycle_path = self._move_to_recycle(folder_path)
+                    recycle_moves.append({"recycle": str(recycle_path), "original": str(folder_path)})
                 except Exception as exc:
                     messagebox.showerror("Remove failed", f"Could not remove folder {folder_path}: {exc}")
                     return
@@ -1787,10 +2099,12 @@ class DocumentTrackerApp:
         for row in file_rows:
             rel_path = row.get("relative_path", "")
             if rel_path in delete_rel_paths:
+                removed_rows.append(dict(row))
                 file_path = project_root / Path(rel_path)
                 if file_path.exists():
                     try:
-                        self._move_to_recycle(file_path)
+                        recycle_path = self._move_to_recycle(file_path)
+                        recycle_moves.append({"recycle": str(recycle_path), "original": str(file_path)})
                     except Exception as exc:
                         messagebox.showerror("Remove failed", f"Could not remove file {file_path}: {exc}")
                         return
@@ -1810,7 +2124,71 @@ class DocumentTrackerApp:
         self.selected_file = None
         self.selected_item_kind = ""
         self.selected_item_rel = ""
+        if recycle_moves or removed_rows:
+            self.undo_stack.append({
+                "type": "remove",
+                "project_id": self.selected_project.project_id,
+                "moves": recycle_moves,
+                "rows": removed_rows,
+            })
         self.refresh_files()
+
+    def undo_last_operation(self) -> None:
+        if not self.undo_stack:
+            messagebox.showinfo("Undo", "Nothing to undo.")
+            return
+
+        entry = self.undo_stack.pop()
+        entry_type = str(entry.get("type", ""))
+
+        try:
+            if entry_type == "paste":
+                for item in reversed(list(entry.get("items", []))):
+                    operation = str(item.get("operation", ""))
+                    kind = str(item.get("kind", "file"))
+                    target = Path(str(item.get("target", "")))
+                    if operation == "copy":
+                        if target.exists():
+                            if kind == "folder" and target.is_dir():
+                                shutil.rmtree(target)
+                            elif target.is_file():
+                                target.unlink()
+                    elif operation == "move":
+                        source = Path(str(item.get("source", "")))
+                        if target.exists() and not source.exists():
+                            source.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.move(str(target), str(source))
+
+            elif entry_type == "rename":
+                source = Path(str(entry.get("source", "")))
+                target = Path(str(entry.get("target", "")))
+                if target.exists() and not source.exists():
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    target.rename(source)
+
+            elif entry_type == "remove":
+                for move in reversed(list(entry.get("moves", []))):
+                    recycle_path = Path(str(move.get("recycle", "")))
+                    original_path = Path(str(move.get("original", "")))
+                    if recycle_path.exists() and not original_path.exists():
+                        original_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(recycle_path), str(original_path))
+
+                rows = list(entry.get("rows", []))
+                if rows:
+                    file_rows = self.csv.read_rows("files")
+                    existing_pairs = {(row.get("project_id", ""), row.get("relative_path", "")) for row in file_rows}
+                    for row in rows:
+                        key = (row.get("project_id", ""), row.get("relative_path", ""))
+                        if key not in existing_pairs:
+                            file_rows.append(row)
+                            existing_pairs.add(key)
+                    self.csv.write_rows("files", file_rows)
+
+            self.refresh_repository()
+            messagebox.showinfo("Undo", "Last operation has been undone.")
+        except Exception as exc:
+            messagebox.showerror("Undo failed", f"Could not undo the last operation: {exc}")
 
     def delete_project_folder(self) -> None:
         if not self.selected_project:
@@ -2022,8 +2400,56 @@ class DocumentTrackerApp:
     def _bind_shortcuts(self) -> None:
         self.root.bind("<Control-f>", lambda event: self._focus_file_search())
         self.root.bind("<Control-n>", lambda event: self.add_project())
+        self.root.bind("<Control-c>", self._shortcut_copy)
+        self.root.bind("<Control-x>", self._shortcut_cut)
+        self.root.bind("<Control-v>", self._shortcut_paste)
+        self.root.bind("<Control-z>", self._shortcut_undo)
+        self.root.bind("<BackSpace>", self._shortcut_back)
+        self.root.bind("<Delete>", self._shortcut_delete)
         self.root.bind("<F5>", lambda event: self.refresh_repository())
-        self.root.bind("<Alt-Left>", lambda event: self.go_back_folder())
+
+    def _focused_widget_is_text_input(self) -> bool:
+        focused = self.root.focus_get()
+        return isinstance(focused, (tk.Entry, ttk.Entry, tk.Text))
+
+    def _shortcut_copy(self, event: tk.Event) -> str | None:
+        if self._focused_widget_is_text_input():
+            return None
+        self.copy_selected_items()
+        return "break"
+
+    def _shortcut_cut(self, event: tk.Event) -> str | None:
+        if self._focused_widget_is_text_input():
+            return None
+        self.move_selected_items()
+        return "break"
+
+    def _shortcut_paste(self, event: tk.Event) -> str | None:
+        if self._focused_widget_is_text_input():
+            return None
+        self.paste_pending_items_here()
+        return "break"
+
+    def _shortcut_undo(self, event: tk.Event) -> str | None:
+        if self._focused_widget_is_text_input():
+            return None
+        self.undo_last_operation()
+        return "break"
+
+    def _shortcut_back(self, event: tk.Event) -> str | None:
+        if self._focused_widget_is_text_input():
+            return None
+        self.go_back_folder()
+        return "break"
+
+    def _shortcut_delete(self, event: tk.Event) -> str | None:
+        if self._focused_widget_is_text_input():
+            return None
+        if self.root.focus_get() == self.todo_listbox and self.todo_listbox.curselection():
+            self.remove_todo_item()
+            return "break"
+        self.remove_item()
+        return "break"
 
     def _focus_file_search(self) -> None:
         self.search_entry.focus_set()
@@ -2046,19 +2472,8 @@ class DocumentTrackerApp:
         # Scale font sizes
         scaled_font_size = int(max(8, 9 * self.scale_factor))
 
-        # Scale tree view column widths and row heights
-        scaled_name_width = int(self.project_tree_base_name_width * self.scale_factor)
-        scaled_tags_width = int(self.project_tree_base_tags_width * self.scale_factor)
-
-        self.project_tree.column("name", width=scaled_name_width)
-        self.project_tree.column("tags", width=scaled_tags_width)
-
-        scaled_file_name = int(self.file_tree_base_name_width * self.scale_factor)
-        scaled_file_size = int(self.file_tree_base_size_width * self.scale_factor)
-        scaled_file_modified = int(self.file_tree_base_modified_width * self.scale_factor)
-        self.file_tree.column("#0", width=scaled_file_name)
-        self.file_tree.column("size", width=scaled_file_size)
-        self.file_tree.column("modified", width=scaled_file_modified)
+        self._fit_project_tree_columns()
+        self._fit_file_tree_columns()
 
         # Scale text widget dimensions and fonts
         new_details_height = max(4, int(self.details_text_base_height * self.scale_factor))
@@ -2070,19 +2485,112 @@ class DocumentTrackerApp:
         self.todo_listbox.config(height=new_todo_height, font=("TkDefaultFont", scaled_font_size))
 
         # Scale dashboard canvas heights
-        scaled_activity_height = max(30, int(38 * self.scale_factor))
-        scaled_top_height = max(30, int(44 * self.scale_factor))
-        self.dash_activity_canvas.config(height=scaled_activity_height)
-        self.dash_top_canvas.config(height=scaled_top_height)
+        self._apply_dashboard_compact_layout()
 
         # Redraw dashboard with new dimensions
         self._update_dashboard()
 
-    def _move_to_recycle(self, path: Path) -> None:
+    def _fit_project_tree_columns(self) -> None:
+        tree_width = self.project_tree.winfo_width()
+        if tree_width <= 1:
+            return
+
+        usable_width = max(120, tree_width - 6)
+        name_width = int(usable_width * self.project_tree_name_ratio)
+        tags_width = max(50, usable_width - name_width)
+        name_width = max(70, usable_width - tags_width)
+
+        self.project_tree.column("name", width=name_width, anchor="w", stretch=False)
+        self.project_tree.column("tags", width=tags_width, anchor="w", stretch=False)
+
+    def _reset_project_tree_columns_to_default(self) -> None:
+        self._fit_project_tree_columns()
+
+    def _reset_file_tree_columns_to_default(self) -> None:
+        self._fit_file_tree_columns()
+
+    def _fit_file_tree_columns(self) -> None:
+        tree_width = self.file_tree.winfo_width()
+        if tree_width <= 1:
+            return
+
+        usable_width = max(180, tree_width - 6)
+        if usable_width < 260:
+            size_width = max(50, int(usable_width * 0.18))
+            modified_width = max(70, int(usable_width * 0.24))
+            name_width = max(60, usable_width - size_width - modified_width)
+        else:
+            name_width = int(usable_width * self.file_tree_name_ratio)
+            size_width = int(usable_width * self.file_tree_size_ratio)
+            modified_width = usable_width - name_width - size_width
+
+            size_width = max(70, size_width)
+            modified_width = max(120, modified_width)
+            name_width = max(90, usable_width - size_width - modified_width)
+
+        self.file_tree.column("#0", width=name_width, anchor="w", stretch=False)
+        self.file_tree.column("size", width=size_width, anchor="w", stretch=False)
+        self.file_tree.column("modified", width=modified_width, anchor="w", stretch=False)
+
+    def _apply_dashboard_compact_layout(self) -> None:
+        frame_width = self.dashboard_frame.winfo_width()
+        if frame_width <= 1:
+            frame_width = 200
+        width_scale = max(0.55, min(1.0, frame_width / 240))
+        scaled_activity_height = max(22, int(38 * self.scale_factor * width_scale))
+        scaled_top_height = max(26, int(44 * self.scale_factor * width_scale))
+        self.dash_activity_canvas.config(height=scaled_activity_height)
+        self.dash_top_canvas.config(height=scaled_top_height)
+        self.dashboard_active_project.config(wraplength=max(90, frame_width - 24))
+
+    def _reset_main_pane_sashes_to_default(self) -> None:
+        total = self.main_pane.winfo_width()
+        if total <= 1:
+            return
+        side = total // 6
+        self.main_pane.sashpos(0, side)
+        self.main_pane.sashpos(1, total - side)
+
+    def _on_main_pane_double_click(self, event: tk.Event) -> str | None:
+        sash_hit_padding = 8
+        if abs(event.x - self.main_pane.sashpos(0)) <= sash_hit_padding or abs(event.x - self.main_pane.sashpos(1)) <= sash_hit_padding:
+            self._reset_main_pane_sashes_to_default()
+            return "break"
+        return None
+
+    def _autofit_treeview_column(self, tree: ttk.Treeview, column_id: str, min_width: int = 60) -> None:
+        if not column_id:
+            return
+
+        columns = list(tree["columns"])
+        column_key = column_id
+        if column_id.startswith("#") and column_id != "#0":
+            try:
+                index = int(column_id[1:]) - 1
+            except ValueError:
+                return
+            if index < 0 or index >= len(columns):
+                return
+            column_key = columns[index]
+
+        heading_text = str(tree.heading(column_key, "text") or "")
+        max_chars = len(heading_text)
+        for item_id in tree.get_children(""):
+            if column_key == "#0":
+                value = str(tree.item(item_id, "text") or "")
+            else:
+                value = str(tree.set(item_id, column_key) or "")
+            max_chars = max(max_chars, len(value))
+
+        width = max(min_width, (max_chars * 8) + 24)
+        tree.column(column_key, width=width, stretch=False)
+
+    def _move_to_recycle(self, path: Path) -> Path:
         self.recycle_bin_folder.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         destination = self.recycle_bin_folder / f"{stamp}_{path.name}"
         shutil.move(str(path), str(destination))
+        return destination
 
     def _snapshot_path_for_relative(self, project_id: str, relative_path: str) -> Path:
         safe_rel = Path(relative_path)
@@ -2109,6 +2617,7 @@ class DocumentTrackerApp:
         shutil.copy2(file_path, target)
 
     def _update_dashboard(self) -> None:
+        self._apply_dashboard_compact_layout()
         projects = self.csv.read_rows("projects")
         files = self.csv.read_rows("files")
         changes = self.csv.read_rows("change_log")
