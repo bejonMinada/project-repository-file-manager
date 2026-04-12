@@ -64,7 +64,7 @@ Project File Manager is shown in-app as a local desktop application for organizi
 
 The launcher will:
 
-1. Ensure the `repository` folder exists.
+1. Ensure the `repository`, `snapshots`, and `recycle_bin` folders exist.
 2. Find Python (from venv, PATH, or common install locations).
 3. Create `.venv` if missing.
 4. Install dependencies from `requirements.txt` (if any).

@@ -7,6 +7,12 @@ MIN_PYTHON_VERSION = (3, 10)
 PROJECT_ROOT = Path(__file__).resolve().parent
 VENV_DIR = PROJECT_ROOT / ".venv"
 REQUIREMENTS_FILE = PROJECT_ROOT / "requirements.txt"
+RUNTIME_FOLDERS = ("repository", "snapshots", "recycle_bin")
+
+
+def ensure_runtime_folders() -> None:
+    for folder_name in RUNTIME_FOLDERS:
+        (PROJECT_ROOT / folder_name).mkdir(parents=True, exist_ok=True)
 
 
 def check_python_version() -> None:
@@ -50,6 +56,7 @@ def run_application(python_exe: Path) -> int:
 
 
 def main() -> None:
+    ensure_runtime_folders()
     check_python_version()
     python_exe = create_virtualenv()
     if Path(sys.executable).resolve() != python_exe.resolve():

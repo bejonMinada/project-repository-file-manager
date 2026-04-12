@@ -12,6 +12,7 @@ from file_scanner import compute_checksum, scan_project_files
 from launch_app import (
     check_python_version,
     create_virtualenv,
+    ensure_runtime_folders,
     install_requirements,
     read_requirements,
     run_application,
@@ -330,6 +331,17 @@ class ProjectFileManagerTests(unittest.TestCase):
     def test_run_application_returns_exit_code(self) -> None:
         with patch("launch_app.subprocess.run", return_value=SimpleNamespace(returncode=7)):
             self.assertEqual(run_application(Path("C:/fake/python.exe")), 7)
+
+    def test_ensure_runtime_folders_creates_all_required_folders(self) -> None:
+        custom_root = self.temp_dir / "launcher_root"
+        custom_root.mkdir(parents=True, exist_ok=True)
+
+        with patch.object(launch_app, "PROJECT_ROOT", custom_root):
+            ensure_runtime_folders()
+
+        self.assertTrue((custom_root / "repository").is_dir())
+        self.assertTrue((custom_root / "snapshots").is_dir())
+        self.assertTrue((custom_root / "recycle_bin").is_dir())
 
 
 if __name__ == "__main__":

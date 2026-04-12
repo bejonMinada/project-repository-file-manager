@@ -3,10 +3,18 @@ setlocal enabledelayedexpansion
 set "ROOT=%~dp0"
 set "VENV_PY=%ROOT%.venv\Scripts\python.exe"
 set "REPO_DIR=%ROOT%repository"
+set "SNAPSHOTS_DIR=%ROOT%snapshots"
+set "RECYCLE_BIN_DIR=%ROOT%recycle_bin"
 
-:: Ensure repository folder exists for first-time launch on new devices
+:: Ensure required runtime folders exist for first-time launch on new devices
 if not exist "%REPO_DIR%" (
     mkdir "%REPO_DIR%"
+)
+if not exist "%SNAPSHOTS_DIR%" (
+    mkdir "%SNAPSHOTS_DIR%"
+)
+if not exist "%RECYCLE_BIN_DIR%" (
+    mkdir "%RECYCLE_BIN_DIR%"
 )
 
 :: 1. Use existing venv python if available
