@@ -1,4 +1,5 @@
 import os
+import json
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from file_scanner import compute_checksum, scan_project_files
 from models import ChangeRecord, Project, TrackedFile
 
 APP_VERSION = "1.4"
+APP_SETTINGS_FILE = "app_settings.json"
 
 class DocumentTrackerApp:
     def __init__(self, root: tk.Tk) -> None:
@@ -46,11 +48,16 @@ class DocumentTrackerApp:
             "generic": self._create_file_icon("#9e9e9e", "generic"),
         }
         self.csv = CSVManager()
-        self.repository_folder = Path(__file__).resolve().parent / "repository"
+        if getattr(sys, 'frozen', False):
+            self.app_base_dir = Path(sys.executable).resolve().parent
+        else:
+            self.app_base_dir = Path(__file__).resolve().parent
+        self.settings_path = self.app_base_dir / APP_SETTINGS_FILE
+        self.repository_folder = self._load_repository_folder()
         self.repository_folder.mkdir(parents=True, exist_ok=True)
-        self.snapshots_folder = Path(__file__).resolve().parent / "snapshots"
+        self.snapshots_folder = self.app_base_dir / "snapshots"
         self.snapshots_folder.mkdir(parents=True, exist_ok=True)
-        self.recycle_bin_folder = Path(__file__).resolve().parent / "recycle_bin"
+        self.recycle_bin_folder = self.app_base_dir / "recycle_bin"
         self.recycle_bin_folder.mkdir(parents=True, exist_ok=True)
         self.projects: List[Project] = []
         self.tracked_files: List[TrackedFile] = []
@@ -83,11 +90,15 @@ class DocumentTrackerApp:
         top_frame.grid(row=0, column=0, sticky="ew")
         top_frame.columnconfigure(1, weight=1)
         ttk.Button(top_frame, text="About", command=self.show_about).grid(row=0, column=0, sticky="w")
-        right_buttons = ttk.Frame(top_frame)
-        right_buttons.grid(row=0, column=2, sticky="e")
-        ttk.Button(right_buttons, text="Backup", command=self.export_backup).pack(side="left", padx=(0, 4))
-        ttk.Button(right_buttons, text="Import", command=self.import_backup).pack(side="left", padx=(0, 4))
-        ttk.Button(right_buttons, text="Reset", command=self.reset_all_data).pack(side="left")
+        ttk.Button(top_frame, text="Settings", command=self.open_settings).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.data_actions_button = ttk.Menubutton(top_frame, text="Data Actions")
+        self.data_actions_button.grid(row=0, column=2, sticky="e")
+        self.data_actions_menu = tk.Menu(self.data_actions_button, tearoff=0)
+        self.data_actions_menu.add_command(label="Backup", command=self.export_backup)
+        self.data_actions_menu.add_command(label="Import", command=self.import_backup)
+        self.data_actions_menu.add_separator()
+        self.data_actions_menu.add_command(label="Reset", command=self.reset_all_data)
+        self.data_actions_button["menu"] = self.data_actions_menu
 
         main_pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         main_pane.grid(row=1, column=0, sticky="nsew")
@@ -342,6 +353,93 @@ class DocumentTrackerApp:
                 subprocess.run(["xdg-open", str(project_root)])
         except Exception as exc:
             messagebox.showerror("Open failed", f"Could not open folder: {exc}")
+
+    def _load_repository_folder(self) -> Path:
+        default_path = self.app_base_dir / "repository"
+        if not self.settings_path.exists():
+            return default_path
+
+        try:
+            data = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except Exception:
+            return default_path
+
+        raw_path = str(data.get("repository_path", "")).strip()
+        if not raw_path:
+            return default_path
+
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = (self.app_base_dir / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+        return candidate
+
+    def _save_repository_folder_setting(self, folder: Path) -> None:
+        payload = {"repository_path": str(folder)}
+        self.settings_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def open_settings(self) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Settings")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.geometry("720x170")
+        dialog.resizable(False, False)
+
+        ttk.Label(dialog, text="Repository Folder:").pack(anchor="w", padx=12, pady=(12, 4))
+        path_var = tk.StringVar(value=str(self.repository_folder))
+
+        path_row = ttk.Frame(dialog)
+        path_row.pack(fill="x", padx=12)
+        path_entry = ttk.Entry(path_row, textvariable=path_var)
+        path_entry.pack(side="left", fill="x", expand=True)
+
+        def browse_folder() -> None:
+            selected = filedialog.askdirectory(
+                title="Select repository folder",
+                initialdir=path_var.get() or str(self.app_base_dir),
+            )
+            if selected:
+                path_var.set(selected)
+
+        ttk.Button(path_row, text="Browse", command=browse_folder).pack(side="left", padx=(8, 0))
+
+        ttk.Label(
+            dialog,
+            text="Tip: You can select a OneDrive-synced SharePoint folder here.",
+        ).pack(anchor="w", padx=12, pady=(8, 0))
+
+        button_row = ttk.Frame(dialog)
+        button_row.pack(fill="x", padx=12, pady=(14, 0))
+
+        def save_settings() -> None:
+            target = Path(path_var.get().strip()).expanduser()
+            if not path_var.get().strip():
+                messagebox.showwarning("Settings", "Please choose a repository folder.", parent=dialog)
+                return
+
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+                target = target.resolve()
+                self._save_repository_folder_setting(target)
+            except Exception as exc:
+                messagebox.showerror("Settings", f"Could not save repository path: {exc}", parent=dialog)
+                return
+
+            if target != self.repository_folder:
+                self.repository_folder = target
+                self.selected_project = None
+                self.selected_file = None
+                self.current_folder_rel = ""
+                self.pending_file_operation = None
+                self.refresh_repository()
+
+            dialog.destroy()
+
+        ttk.Button(button_row, text="Save", command=save_settings).pack(side="right")
+        ttk.Button(button_row, text="Cancel", command=dialog.destroy).pack(side="right", padx=(0, 8))
+        dialog.wait_window()
 
     def show_about(self) -> None:
         messagebox.showinfo(
@@ -1754,6 +1852,7 @@ class DocumentTrackerApp:
         """On startup: remove projects whose folder is gone and register any new
         subfolders found inside the repository directory."""
         repo = self.repository_folder
+        repo.mkdir(parents=True, exist_ok=True)
         project_rows = self.csv.read_rows("projects")
 
         # Separate valid from stale projects

@@ -11,6 +11,7 @@ Project File Manager is shown in-app as a local desktop application for organizi
 ## Features
 
 - Auto-detects project folders inside the built-in `repository` directory on launch and during global refresh.
+- Repository path is configurable from `Settings`, including OneDrive-synced SharePoint folders.
 - Global `Refresh` scans the entire repository and updates all projects and tracked file records.
 - Snapshot support for tracked files (used by compare/restore workflows).
 - Diff view for text-readable files using previous snapshots, with metadata fallback for non-text files.
@@ -47,6 +48,7 @@ Project File Manager is shown in-app as a local desktop application for organizi
 - `file_scanner.py`: recursive file scanning and checksum generation.
 - `change_detector.py`: change comparison logic.
 - `Project File Manager.bat`: Windows launcher with Python detection and venv bootstrapping.
+- `app_settings.json`: stores app settings such as custom repository path.
 - `repository/`: project folders tracked by the app.
 - `projects.csv`, `files.csv`, `change_log.csv`, `todos.csv`: local data files.
 - `snapshots/`: automatic file snapshots for compare/restore features.
@@ -81,6 +83,7 @@ The launcher will:
 ## Main Actions
 
 - `Add Project`: creates a new project folder and project record.
+- `Settings`: configure the repository folder location.
 - `Refresh`: globally refreshes all repository projects and tracked files.
 - `Toggle Pin`: pin or unpin a project.
 - `Edit Details`: updates project name/description/tags and logs relevant changes.

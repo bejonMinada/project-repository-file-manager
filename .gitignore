@@ -5,4 +5,5 @@ repository/
 .git/
 snapshots/
 recycle_bin/
+build/
 *.pyc
