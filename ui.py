@@ -210,7 +210,11 @@ class DocumentTrackerApp:
         def on_content_configure(event: object) -> None:
             self.right_scroll_canvas.configure(scrollregion=self.right_scroll_canvas.bbox("all"))
         
+        def on_canvas_configure(event: tk.Event) -> None:
+            self.right_scroll_canvas.itemconfig(self.content_window, width=event.width)
+        
         self.content_frame.bind("<Configure>", on_content_configure)
+        self.right_scroll_canvas.bind("<Configure>", on_canvas_configure)
         self.right_scroll_canvas.bind("<MouseWheel>", lambda e: self.right_scroll_canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"))
         self.right_scroll_canvas.bind("<Button-4>", lambda e: self.right_scroll_canvas.yview_scroll(-1, "units"))
         self.right_scroll_canvas.bind("<Button-5>", lambda e: self.right_scroll_canvas.yview_scroll(1, "units"))
@@ -256,7 +260,7 @@ class DocumentTrackerApp:
 
         detail_label = ttk.Label(self.content_frame, text="File Details")
         detail_label.pack(anchor="w")
-        self.details_text = tk.Text(self.content_frame, width=42, height=10, wrap="word", state="disabled")
+        self.details_text = tk.Text(self.content_frame, height=10, wrap="word", state="disabled")
         self.details_text_base_width = 42
         self.details_text_base_height = 10
         self.details_text.pack(fill="both", expand=True, pady=(0, 4))
@@ -267,7 +271,7 @@ class DocumentTrackerApp:
         self.history_filter_combo.set("ALL")
         self.history_filter_combo.bind("<<ComboboxSelected>>", lambda event: self._show_history())
         self.history_filter_combo.pack(anchor="w", pady=(2, 2))
-        self.history_text = tk.Text(self.content_frame, width=42, height=10, wrap="word", state="disabled")
+        self.history_text = tk.Text(self.content_frame, height=10, wrap="word", state="disabled")
         self.history_text_base_width = 42
         self.history_text_base_height = 10
         self.history_text.pack(fill="both", expand=True, pady=(0, 4))
@@ -278,7 +282,7 @@ class DocumentTrackerApp:
 
         todo_label = ttk.Label(self.content_frame, text="Project Notes")
         todo_label.pack(anchor="w", pady=(2, 0))
-        self.todo_listbox = tk.Listbox(self.content_frame, height=10)
+        self.todo_listbox = tk.Listbox(self.content_frame)
         self.todo_listbox_base_height = 10
         self.todo_listbox.pack(fill="both", expand=True, pady=(0, 4))
         todo_buttons_frame = ttk.Frame(self.content_frame)
