@@ -47,11 +47,11 @@ class DocumentTrackerApp:
             "video": self._create_file_icon("#9c27b0", "video"),
             "generic": self._create_file_icon("#9e9e9e", "generic"),
         }
-        self.csv = CSVManager()
         if getattr(sys, 'frozen', False):
             self.app_base_dir = Path(sys.executable).resolve().parent
         else:
             self.app_base_dir = Path(__file__).resolve().parent
+        self.csv = CSVManager(base_dir=self.app_base_dir)
         self.settings_path = self.app_base_dir / APP_SETTINGS_FILE
         self.repository_folder = self._load_repository_folder()
         self.repository_folder.mkdir(parents=True, exist_ok=True)
