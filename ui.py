@@ -197,7 +197,7 @@ class DocumentTrackerApp:
         self.dashboard_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
         # Create scrollable canvas for content sections
-        self.right_scroll_canvas = tk.Canvas(right_frame, highlightthickness=0, bg="white")
+        self.right_scroll_canvas = tk.Canvas(right_frame, highlightthickness=0)
         self.right_scroll_canvas.grid(row=1, column=0, sticky="nsew")
         
         scrollbar = ttk.Scrollbar(right_frame, orient="vertical", command=self.right_scroll_canvas.yview)
