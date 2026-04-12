@@ -27,6 +27,8 @@ class ProjectFileManagerTests(unittest.TestCase):
         self.assertTrue(self.csv_manager.paths["files"].exists())
         self.assertTrue(self.csv_manager.paths["change_log"].exists())
         self.assertTrue(self.csv_manager.paths["todos"].exists())
+        project_headers = self.csv_manager.paths["projects"].read_text(encoding="utf-8").splitlines()[0]
+        self.assertIn("pinned", project_headers)
 
     def test_scan_project_files_and_detect_modify(self) -> None:
         test_file = self.project_root / "example.txt"
@@ -79,6 +81,7 @@ class ProjectFileManagerTests(unittest.TestCase):
         rows = manager.read_rows("projects")
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["project_name"], "Legacy Project")
+        self.assertIn("pinned", rows[0])
 
     def test_does_not_overwrite_existing_csv_during_migration(self) -> None:
         legacy_home = self.temp_dir / "legacy_home_2"
@@ -105,6 +108,49 @@ class ProjectFileManagerTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["project_name"], "Current Project")
 
+
+    def test_detect_changes_move(self) -> None:
+        original_file = self.project_root / "old_name.txt"
+        original_file.write_text("content", encoding="utf-8")
+        checksum = compute_checksum(original_file)
+        tracked = TrackedFile(
+            file_id="1",
+            project_id="1",
+            relative_path="old_name.txt",
+            extension=".txt",
+            file_size=original_file.stat().st_size,
+            last_modified="",
+            checksum=checksum,
+            notes="",
+        )
+        scanned = [{
+            "relative_path": "new_name.txt",
+            "extension": ".txt",
+            "file_size": str(original_file.stat().st_size),
+            "last_modified": "",
+            "checksum": checksum,
+        }]
+        changes = detect_changes("1", [tracked], scanned)
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0].change_type, "MOVE")
+        self.assertEqual(changes[0].old_value, "old_name.txt")
+        self.assertEqual(changes[0].new_value, "new_name.txt")
+
+    def test_detect_changes_remove(self) -> None:
+        tracked = TrackedFile(
+            file_id="1",
+            project_id="1",
+            relative_path="deleted.txt",
+            extension=".txt",
+            file_size=0,
+            last_modified="",
+            checksum="abc123",
+            notes="",
+        )
+        changes = detect_changes("1", [tracked], [])
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0].change_type, "REMOVE")
+        self.assertEqual(changes[0].old_value, "deleted.txt")
 
 if __name__ == "__main__":
     unittest.main()

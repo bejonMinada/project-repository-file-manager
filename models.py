@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 @dataclass
 class Project:
@@ -10,6 +9,7 @@ class Project:
     root_path: str
     description: str = ""
     tags: str = ""
+    pinned: str = "0"
     created_date: str = field(default_factory=lambda: datetime.now().isoformat())
     last_scanned_date: str = ""
 
@@ -21,6 +21,7 @@ class Project:
             root_path=row.get("root_path", ""),
             description=row.get("description", ""),
             tags=row.get("tags", ""),
+            pinned=row.get("pinned", "0"),
             created_date=row.get("created_date", ""),
             last_scanned_date=row.get("last_scanned_date", ""),
         )
@@ -32,6 +33,7 @@ class Project:
             "root_path": self.root_path,
             "description": self.description,
             "tags": self.tags,
+            "pinned": self.pinned,
             "created_date": self.created_date,
             "last_scanned_date": self.last_scanned_date,
         }

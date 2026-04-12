@@ -3,4 +3,6 @@
 __pycache__/
 repository/
 .git/
+snapshots/
+recycle_bin/
 *.pyc

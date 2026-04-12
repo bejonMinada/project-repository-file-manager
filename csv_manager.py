@@ -8,6 +8,7 @@ PROJECTS_SCHEMA = [
     "root_path",
     "description",
     "tags",
+    "pinned",
     "created_date",
     "last_scanned_date",
 ]
@@ -75,6 +76,26 @@ class CSVManager:
             with path.open("w", newline="", encoding="utf-8") as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=headers)
                 writer.writeheader()
+            return
+
+        # Upgrade existing CSV files when schema gains new columns.
+        with path.open("r", newline="", encoding="utf-8") as csvfile:
+            reader = csv.DictReader(csvfile)
+            current_headers = reader.fieldnames or []
+            rows = [row for row in reader if any(row.values())]
+
+        if current_headers == headers:
+            return
+
+        normalized_rows: List[Dict[str, str]] = []
+        for row in rows:
+            normalized = {header: row.get(header, "") for header in headers}
+            normalized_rows.append(normalized)
+
+        with path.open("w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(normalized_rows)
 
     def read_rows(self, name: str) -> List[Dict[str, str]]:
         path = self.paths[name]
