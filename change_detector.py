@@ -1,5 +1,4 @@
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, List
 
 from models import ChangeRecord, TrackedFile
@@ -28,7 +27,7 @@ def detect_changes(
         old = old_index.get(rel_path)
         if old is None:
             moved = checksum_index.get(current["checksum"])
-            if moved:
+            if moved and moved.relative_path not in current_index:
                 records.append(
                     ChangeRecord(
                         timestamp=now,

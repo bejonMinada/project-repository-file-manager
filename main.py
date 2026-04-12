@@ -5,7 +5,7 @@ from ui import DocumentTrackerApp
 
 def main() -> None:
     root = tk.Tk()
-    app = DocumentTrackerApp(root)
+    DocumentTrackerApp(root)
     root.mainloop()
 
 

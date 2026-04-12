@@ -1,4 +1,5 @@
 import csv
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -67,7 +68,6 @@ class CSVManager:
             dest = self.base_dir / filename
             src = legacy_dir / filename
             if src.exists() and not dest.exists():
-                import shutil
                 shutil.copy2(src, dest)
 
     def _ensure_csv(self, name: str, headers: List[str]) -> None:

@@ -16,7 +16,7 @@ from csv_manager import CSVManager
 from file_scanner import compute_checksum, scan_project_files
 from models import ChangeRecord, Project, TrackedFile
 
-APP_VERSION = "1.2"
+APP_VERSION = "1.4"
 
 class DocumentTrackerApp:
     def __init__(self, root: tk.Tk) -> None:
@@ -54,12 +54,12 @@ class DocumentTrackerApp:
         self.recycle_bin_folder.mkdir(parents=True, exist_ok=True)
         self.projects: List[Project] = []
         self.tracked_files: List[TrackedFile] = []
-        self.change_rows: List[ChangeRecord] = []
         self.selected_project: Optional[Project] = None
         self.selected_file: Optional[TrackedFile] = None
         self.current_folder_rel: str = ""
         self.selected_item_kind: str = ""
         self.selected_item_rel: str = ""
+        self.pending_file_operation: Optional[dict[str, object]] = None
         self.sort_state = {
             "projects": {"name": False, "tags": False},
             "files": {"path": False, "size": False, "modified": False},
@@ -110,8 +110,7 @@ class DocumentTrackerApp:
         self.project_search_entry.pack(side="left", fill="x", expand=True, padx=(4, 0))
         self.project_search_entry.bind("<KeyRelease>", lambda event: self.refresh_projects())
 
-        self.project_tree = ttk.Treeview(left_frame, columns=("name", "tags"), show="headings", height=20, selectmode="extended")
-        self.project_tree_base_height = 20
+        self.project_tree = ttk.Treeview(left_frame, columns=("name", "tags"), show="headings", height=20)
         self.project_tree.heading("name", text="Project Name", command=lambda: self._sort_project_tree("name"))
         self.project_tree.heading("tags", text="Tags", command=lambda: self._sort_project_tree("tags"))
         self.project_tree.column("name", width=220, anchor="w")
@@ -127,7 +126,6 @@ class DocumentTrackerApp:
         self.project_context_menu.add_command(label="View Project Details", command=self.view_project_details)
         self.project_context_menu.add_command(label="Edit Details", command=self.edit_project_details)
         self.project_context_menu.add_command(label="Toggle Pin", command=self.toggle_project_pin)
-        self.project_context_menu.add_command(label="Bulk Edit Tags", command=self.bulk_edit_project_tags)
         self.project_context_menu.add_separator()
         self.project_context_menu.add_command(label="Delete Project Folder", command=self.delete_project_folder)
 
@@ -159,7 +157,6 @@ class DocumentTrackerApp:
         self.breadcrumb_label = ttk.Label(center_frame, text="Path: /")
         self.breadcrumb_label.pack(anchor="w", pady=(0, 4))
         self.file_tree = ttk.Treeview(center_frame, columns=("size", "modified"), show="tree headings", height=20, selectmode="extended")
-        self.file_tree_base_height = 20
         self.file_tree.heading("#0", text="Item Name", command=lambda: self._sort_file_tree("path"))
         self.file_tree.heading("size", text="Size", command=lambda: self._sort_file_tree("size"))
         self.file_tree.heading("modified", text="Last Modified", command=lambda: self._sort_file_tree("modified"))
@@ -178,11 +175,14 @@ class DocumentTrackerApp:
         self.file_context_menu.add_command(label="Add/Edit Notes", command=self.add_file_note)
         self.file_context_menu.add_command(label="Open File", command=self.open_file)
         self.file_context_menu.add_command(label="Rename File", command=self.rename_file)
-        self.file_context_menu.add_command(label="Move Selected to Folder", command=self.move_selected_to_folder)
-        self.file_context_menu.add_command(label="Compare to Previous Revision", command=self.compare_with_previous_snapshot)
-        self.file_context_menu.add_command(label="Restore Previous Snapshot", command=self.restore_previous_snapshot)
+        self.file_context_menu.add_command(label="Copy File", command=self.copy_selected_items)
+        self.file_context_menu.add_command(label="Move File", command=self.move_selected_items)
+        self.file_context_menu.add_command(label="Compare to Previous Revision", command=self.compare_to_previous_revision)
+        self.file_context_menu.add_command(label="Restore Previous Revision", command=self.restore_previous_revision)
         self.file_context_menu.add_separator()
         self.file_context_menu.add_command(label="Remove File/Folder", command=self.remove_item)
+
+        self.file_destination_menu = tk.Menu(self.root, tearoff=0)
 
         file_buttons = ttk.Frame(center_frame)
         file_buttons.pack(fill="x", pady=(8, 0))
@@ -199,25 +199,22 @@ class DocumentTrackerApp:
         # Create scrollable canvas for content sections
         self.right_scroll_canvas = tk.Canvas(right_frame, highlightthickness=0)
         self.right_scroll_canvas.grid(row=1, column=0, sticky="nsew")
-        
-        scrollbar = ttk.Scrollbar(right_frame, orient="vertical", command=self.right_scroll_canvas.yview)
-        scrollbar.grid(row=1, column=1, sticky="ns")
-        
-        self.right_scroll_canvas.configure(yscrollcommand=scrollbar.set)
+
+        self.right_scrollbar = ttk.Scrollbar(right_frame, orient="vertical", command=self.right_scroll_canvas.yview)
+        self.right_scrollbar.grid(row=1, column=1, sticky="ns")
+
+        self.right_scroll_canvas.configure(yscrollcommand=self.right_scrollbar.set)
         self.content_frame = ttk.Frame(self.right_scroll_canvas)
         self.content_window = self.right_scroll_canvas.create_window((0, 0), window=self.content_frame, anchor="nw")
-        
+
         def on_content_configure(event: object) -> None:
             self.right_scroll_canvas.configure(scrollregion=self.right_scroll_canvas.bbox("all"))
-        
+
         def on_canvas_configure(event: tk.Event) -> None:
             self.right_scroll_canvas.itemconfig(self.content_window, width=event.width)
-        
+
         self.content_frame.bind("<Configure>", on_content_configure)
         self.right_scroll_canvas.bind("<Configure>", on_canvas_configure)
-        self.right_scroll_canvas.bind("<MouseWheel>", lambda e: self.right_scroll_canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"))
-        self.right_scroll_canvas.bind("<Button-4>", lambda e: self.right_scroll_canvas.yview_scroll(-1, "units"))
-        self.right_scroll_canvas.bind("<Button-5>", lambda e: self.right_scroll_canvas.yview_scroll(1, "units"))
 
         tiles_row = ttk.Frame(self.dashboard_frame)
         tiles_row.pack(fill="x")
@@ -261,7 +258,6 @@ class DocumentTrackerApp:
         detail_label = ttk.Label(self.content_frame, text="File Details")
         detail_label.pack(anchor="w")
         self.details_text = tk.Text(self.content_frame, height=10, wrap="word", state="disabled")
-        self.details_text_base_width = 42
         self.details_text_base_height = 10
         self.details_text.pack(fill="both", expand=True, pady=(0, 4))
         history_label = ttk.Label(self.content_frame, text="Project Change History")
@@ -272,7 +268,6 @@ class DocumentTrackerApp:
         self.history_filter_combo.bind("<<ComboboxSelected>>", lambda event: self._show_history())
         self.history_filter_combo.pack(anchor="w", pady=(2, 2))
         self.history_text = tk.Text(self.content_frame, height=10, wrap="word", state="disabled")
-        self.history_text_base_width = 42
         self.history_text_base_height = 10
         self.history_text.pack(fill="both", expand=True, pady=(0, 4))
         history_button_frame = ttk.Frame(self.content_frame)
@@ -291,7 +286,31 @@ class DocumentTrackerApp:
         self.add_note_button.pack(side="left")
         self.remove_note_button = ttk.Button(todo_buttons_frame, text="Remove Selected", command=self.remove_todo_item)
         self.remove_note_button.pack(side="left", padx=(4, 0))
+        self._bind_right_panel_mousewheel(right_frame)
         self._update_file_action_buttons_state()
+
+    def _bind_right_panel_mousewheel(self, widget: tk.Misc) -> None:
+        widget.bind("<MouseWheel>", self._on_right_panel_mousewheel, add="+")
+        widget.bind("<Button-4>", self._on_right_panel_mousewheel, add="+")
+        widget.bind("<Button-5>", self._on_right_panel_mousewheel, add="+")
+        for child in widget.winfo_children():
+            self._bind_right_panel_mousewheel(child)
+
+    def _on_right_panel_mousewheel(self, event: tk.Event) -> str:
+        if getattr(event, "num", None) == 4:
+            delta = -1
+        elif getattr(event, "num", None) == 5:
+            delta = 1
+        else:
+            raw_delta = int(getattr(event, "delta", 0))
+            if raw_delta == 0:
+                return "break"
+            delta = -int(raw_delta / 120) if sys.platform.startswith("win") else (-1 if raw_delta > 0 else 1)
+            if delta == 0:
+                delta = -1 if raw_delta > 0 else 1
+
+        self.right_scroll_canvas.yview_scroll(delta, "units")
+        return "break"
 
     def refresh_projects(self) -> None:
         self.project_tree.delete(*self.project_tree.get_children())
@@ -327,7 +346,7 @@ class DocumentTrackerApp:
     def show_about(self) -> None:
         messagebox.showinfo(
             "About",
-            f"Project File Manager\nVersion {APP_VERSION}\n\nA desktop application for organizing and tracking local project folders, files, change history, snapshots, and project notes. Everything is stored locally with no internet required.\n\nDeveloper: Bejon Minada\n\nMain repository folder:\n{self.repository_folder}",
+            f"Project File Manager\nVersion {APP_VERSION}\n\nA local desktop application for organizing project folders, tracking file changes, comparing revisions, restoring snapshots, and managing project notes in a responsive workspace. All data stays on the device with no cloud dependency.\n\nDeveloper: Bejon Minada\n\nMain repository folder:\n{self.repository_folder}",
         )
 
     def reset_all_data(self) -> None:
@@ -340,7 +359,7 @@ class DocumentTrackerApp:
 
         ttk.Label(
             confirm_dialog,
-            text="This will permanently delete ALL projects, files,\nhistory, and project folders on disk.\n\nType  CLEAR ALL DATA  to confirm:",
+            text="This will permanently delete ALL projects, files,\nhistory, project folders, snapshots, and recycle bin contents.\n\nType  CLEAR ALL DATA  to confirm:",
             justify="center",
         ).pack(pady=(18, 8))
         confirm_entry = ttk.Entry(confirm_dialog, width=30)
@@ -363,6 +382,19 @@ class DocumentTrackerApp:
                         shutil.rmtree(folder)
                     except Exception:
                         pass
+
+            # Clear snapshot and recycle-bin contents while preserving folders.
+            for managed_folder in (self.snapshots_folder, self.recycle_bin_folder):
+                managed_folder.mkdir(parents=True, exist_ok=True)
+                for child in managed_folder.iterdir():
+                    try:
+                        if child.is_dir():
+                            shutil.rmtree(child)
+                        else:
+                            child.unlink()
+                    except Exception:
+                        pass
+
             # Clear all CSV tables
             for table in ("projects", "files", "change_log", "todos"):
                 self.csv.write_rows(table, [])
@@ -371,6 +403,7 @@ class DocumentTrackerApp:
             self.current_folder_rel = ""
             self.selected_item_kind = ""
             self.selected_item_rel = ""
+            self.pending_file_operation = None
             self.projects = []
             self.tracked_files = []
             self.project_todos.clear()
@@ -390,10 +423,13 @@ class DocumentTrackerApp:
         if not selection:
             self.selected_project = None
             self.current_folder_rel = ""
+            self.pending_file_operation = None
             self._update_file_action_buttons_state()
             return
         project_id = selection[0]
         self.selected_project = next((p for p in self.projects if p.project_id == project_id), None)
+        if self.pending_file_operation and self.pending_file_operation.get("project_id") != project_id:
+            self.pending_file_operation = None
         if self.selected_project:
             self.current_folder_rel = ""
             self._sync_untracked_files()
@@ -411,32 +447,6 @@ class DocumentTrackerApp:
                 row["pinned"] = "0" if row.get("pinned", "0") == "1" else "1"
                 self.selected_project.pinned = row["pinned"]
                 break
-        self.csv.write_rows("projects", project_rows)
-        self.refresh_projects()
-
-    def bulk_edit_project_tags(self) -> None:
-        selected_ids = list(self.project_tree.selection())
-        if not selected_ids:
-            messagebox.showwarning("Select projects", "Please select one or more projects.")
-            return
-        new_tags = simpledialog.askstring("Bulk Edit Tags", "Enter tags for selected projects:", parent=self.root)
-        if new_tags is None:
-            return
-        project_rows = self.csv.read_rows("projects")
-        selected_ids_set = set(selected_ids)
-        for row in project_rows:
-            if row.get("project_id") in selected_ids_set:
-                old_tags = row.get("tags", "")
-                row["tags"] = new_tags
-                self.csv.append_row("change_log", ChangeRecord(
-                    timestamp=datetime.now().isoformat(),
-                    project_id=row.get("project_id", ""),
-                    file_id="",
-                    change_type="EDIT",
-                    old_value=old_tags,
-                    new_value=new_tags,
-                    note="Bulk tag update.",
-                ).to_dict())
         self.csv.write_rows("projects", project_rows)
         self.refresh_projects()
 
@@ -1069,8 +1079,10 @@ class DocumentTrackerApp:
     def show_file_context_menu(self, event: object) -> None:
         file_id = self.file_tree.identify_row(event.y)
         if not file_id:
+            self._show_file_destination_menu(event)
             return
-        self.file_tree.selection_set(file_id)
+        if file_id not in self.file_tree.selection():
+            self.file_tree.selection_set(file_id)
         self.file_tree.focus(file_id)
         self.on_file_select(None)
         try:
@@ -1078,48 +1090,112 @@ class DocumentTrackerApp:
         finally:
             self.file_context_menu.grab_release()
 
-    def move_selected_to_folder(self) -> None:
+    def _show_file_destination_menu(self, event: object) -> None:
+        if not self.selected_project or not self.pending_file_operation:
+            return
+        if self.pending_file_operation.get("project_id") != self.selected_project.project_id:
+            self.pending_file_operation = None
+            return
+        operation = str(self.pending_file_operation.get("operation", ""))
+        if operation not in {"copy", "move"}:
+            return
+        self.file_destination_menu.delete(0, tk.END)
+        label = "Copy Here" if operation == "copy" else "Move Here"
+        self.file_destination_menu.add_command(label=label, command=self.paste_pending_items_here)
+        try:
+            self.file_destination_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.file_destination_menu.grab_release()
+
+    def _selected_file_tree_items(self) -> List[tuple[str, str]]:
+        items: List[tuple[str, str]] = []
+        for item in self.file_tree.selection():
+            if "::" not in item:
+                continue
+            kind, relative_path = item.split("::", 1)
+            if kind in {"file", "folder"}:
+                items.append((kind, relative_path))
+        return items
+
+    def _queue_file_operation(self, operation: str) -> None:
         if not self.selected_project:
             return
-        selection = [item for item in self.file_tree.selection() if item.startswith("file::")]
-        if not selection:
-            messagebox.showwarning("Select files", "Please select one or more files.")
+        items = self._selected_file_tree_items()
+        if not items:
+            messagebox.showwarning("Select items", "Please select one or more files or folders.")
             return
-        target_rel = simpledialog.askstring("Move Selected", "Enter destination folder (relative to project root):", parent=self.root)
-        if target_rel is None:
+        self.pending_file_operation = {
+            "operation": operation,
+            "project_id": self.selected_project.project_id,
+            "items": items,
+        }
+
+    def copy_selected_items(self) -> None:
+        self._queue_file_operation("copy")
+
+    def move_selected_items(self) -> None:
+        self._queue_file_operation("move")
+
+    def paste_pending_items_here(self) -> None:
+        if not self.selected_project or not self.pending_file_operation:
             return
-        target_rel = target_rel.strip().strip("/")
+        if self.pending_file_operation.get("project_id") != self.selected_project.project_id:
+            messagebox.showwarning("Paste items", "The queued items belong to a different project.")
+            self.pending_file_operation = None
+            return
+
         project_root = Path(self.selected_project.root_path)
-        target_dir = project_root / Path(target_rel) if target_rel else project_root
-        target_dir.mkdir(parents=True, exist_ok=True)
-        file_rows = self.csv.read_rows("files")
-        for selected in selection:
-            rel = selected.split("::", 1)[1]
-            source = project_root / Path(rel)
-            if not source.exists():
+        destination_dir = project_root / Path(self.current_folder_rel) if self.current_folder_rel else project_root
+        destination_dir.mkdir(parents=True, exist_ok=True)
+
+        operation = str(self.pending_file_operation.get("operation", ""))
+        items = list(self.pending_file_operation.get("items", []))
+        completed = 0
+        skipped: List[str] = []
+
+        for kind, relative_path in items:
+            source_path = project_root / Path(relative_path)
+            if not source_path.exists():
+                skipped.append(f"Missing source: {relative_path}")
                 continue
-            dest = target_dir / source.name
-            if dest.exists():
+
+            target_path = destination_dir / source_path.name
+            if target_path.exists():
+                skipped.append(f"Already exists: {target_path.name}")
                 continue
-            source.rename(dest)
-            new_rel = str(dest.relative_to(project_root)).replace("\\", "/")
-            for row in file_rows:
-                if row.get("project_id") == self.selected_project.project_id and row.get("relative_path") == rel:
-                    row["relative_path"] = new_rel
-                    row["last_modified"] = datetime.fromtimestamp(dest.stat().st_mtime).isoformat()
-                    row["checksum"] = compute_checksum(dest)
-                    break
-            self.csv.append_row("change_log", ChangeRecord(
-                timestamp=datetime.now().isoformat(),
-                project_id=self.selected_project.project_id,
-                file_id="",
-                change_type="MOVE",
-                old_value=rel,
-                new_value=new_rel,
-                note="Bulk move file.",
-            ).to_dict())
-        self.csv.write_rows("files", file_rows)
-        self.refresh_files()
+            if target_path == source_path:
+                skipped.append(f"Same destination: {relative_path}")
+                continue
+            if kind == "folder":
+                try:
+                    target_path.relative_to(source_path)
+                    skipped.append(f"Cannot place folder inside itself: {relative_path}")
+                    continue
+                except ValueError:
+                    pass
+
+            try:
+                if kind == "folder":
+                    if operation == "copy":
+                        shutil.copytree(source_path, target_path)
+                    else:
+                        shutil.move(str(source_path), str(target_path))
+                else:
+                    if operation == "copy":
+                        shutil.copy2(source_path, target_path)
+                    else:
+                        shutil.move(str(source_path), str(target_path))
+                completed += 1
+            except Exception as exc:
+                skipped.append(f"{relative_path}: {exc}")
+
+        if completed:
+            if operation == "move":
+                self.pending_file_operation = None
+            self.refresh_repository()
+
+        if skipped:
+            messagebox.showwarning("Paste items", "Some items were skipped:\n\n" + "\n".join(skipped[:10]))
 
     # Extensions that can be meaningfully diffed as plain text
     _TEXT_DIFFABLE_EXTENSIONS = {
@@ -1135,9 +1211,18 @@ class DocumentTrackerApp:
         ".dockerfile", ".makefile", ".gitignore",
     }
 
-    def compare_with_previous_snapshot(self) -> None:
+    def compare_to_previous_revision(self) -> None:
         if not self.selected_project or not self.selected_file:
             return
+        current_file = Path(self.selected_project.root_path) / Path(self.selected_file.relative_path)
+        if not current_file.exists() or not current_file.is_file():
+            messagebox.showerror("Compare", "The selected file does not exist on disk.")
+            return
+        self._save_snapshot_for_file(
+            self.selected_project.project_id,
+            current_file,
+            self.selected_file.relative_path,
+        )
         snapshots = self._list_snapshots_for_relative(
             self.selected_project.project_id, self.selected_file.relative_path
         )
@@ -1145,7 +1230,6 @@ class DocumentTrackerApp:
             messagebox.showinfo("Compare", "Not enough revisions to compare. Save more changes first.")
             return
 
-        current_file = Path(self.selected_project.root_path) / Path(self.selected_file.relative_path)
         prev_snapshot = snapshots[-2]
         ext = Path(self.selected_file.relative_path).suffix.lower()
         is_text = ext in self._TEXT_DIFFABLE_EXTENSIONS or ext == ""
@@ -1163,7 +1247,10 @@ class DocumentTrackerApp:
         prev_stat = prev_snapshot.stat()
         curr_stat = current_file.stat() if current_file.exists() else None
         prev_label = f"Previous  ({self._format_datetime_readable(datetime.fromtimestamp(prev_stat.st_mtime).isoformat())}  {prev_stat.st_size:,} B)"
-        curr_label = f"Current  ({self._format_datetime_readable(datetime.fromtimestamp(curr_stat.st_mtime).isoformat()) if curr_stat else 'missing'}  {curr_stat.st_size:,} B if curr_stat else '')"
+        curr_label = (
+            f"Current  ({self._format_datetime_readable(datetime.fromtimestamp(curr_stat.st_mtime).isoformat())}  {curr_stat.st_size:,} B)"
+            if curr_stat else "Current  (missing)"
+        )
         ttk.Label(header, text=prev_label, font=("TkFixedFont", 8), foreground="#555").pack(side="left", padx=(0, 20))
         ttk.Label(header, text=curr_label, font=("TkFixedFont", 8), foreground="#555").pack(side="left")
 
@@ -1221,7 +1308,10 @@ class DocumentTrackerApp:
         summary_frame = ttk.Frame(win, padding=(8, 2))
         summary_frame.grid(row=0, column=0, sticky="ew")
         prev_label_text = f"Previous  ({self._format_datetime_readable(datetime.fromtimestamp(prev_stat.st_mtime).isoformat())}  {prev_stat.st_size:,} B)"
-        curr_label_text = f"Current  ({self._format_datetime_readable(datetime.fromtimestamp(curr_stat.st_mtime).isoformat()) if curr_stat else 'missing'}  {curr_stat.st_size:,} B if curr_stat else '')"
+        curr_label_text = (
+            f"Current  ({self._format_datetime_readable(datetime.fromtimestamp(curr_stat.st_mtime).isoformat())}  {curr_stat.st_size:,} B)"
+            if curr_stat else "Current  (missing)"
+        )
         ttk.Label(summary_frame, text=prev_label_text, font=("TkFixedFont", 8), foreground="#555").pack(side="left", padx=(0, 16))
         ttk.Label(summary_frame, text=curr_label_text, font=("TkFixedFont", 8), foreground="#555").pack(side="left", padx=(0, 16))
         ttk.Label(summary_frame, text=f"+{added} added", font=("TkFixedFont", 8), foreground="#2e7d32").pack(side="left", padx=(0, 8))
@@ -1269,22 +1359,28 @@ class DocumentTrackerApp:
                     diff_text.insert("end", line + "\n")
         diff_text.config(state="disabled")
 
-    def restore_previous_snapshot(self) -> None:
+    def restore_previous_revision(self) -> None:
         if not self.selected_project or not self.selected_file:
             return
+        target_file = Path(self.selected_project.root_path) / Path(self.selected_file.relative_path)
+        if target_file.exists() and target_file.is_file():
+            self._save_snapshot_for_file(
+                self.selected_project.project_id,
+                target_file,
+                self.selected_file.relative_path,
+            )
         snapshots = self._list_snapshots_for_relative(self.selected_project.project_id, self.selected_file.relative_path)
         if len(snapshots) < 2:
-            messagebox.showinfo("Restore", "No previous snapshot available.")
+            messagebox.showinfo("Restore", "No previous revision available.")
             return
         previous_snapshot = snapshots[-2]
-        target_file = Path(self.selected_project.root_path) / Path(self.selected_file.relative_path)
-        if not messagebox.askyesno("Restore", "Restore the previous snapshot for this file?"):
+        if not messagebox.askyesno("Restore", "Restore the previous revision for this file?"):
             return
         try:
             target_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(previous_snapshot, target_file)
         except Exception as exc:
-            messagebox.showerror("Restore failed", f"Could not restore snapshot: {exc}")
+            messagebox.showerror("Restore failed", f"Could not restore revision: {exc}")
             return
         self.csv.append_row("change_log", ChangeRecord(
             timestamp=datetime.now().isoformat(),
@@ -1293,7 +1389,7 @@ class DocumentTrackerApp:
             change_type="RESTORE",
             old_value="",
             new_value=self.selected_file.relative_path,
-            note="Restored previous snapshot.",
+            note="Restored previous revision.",
         ).to_dict())
         self.refresh_repository()
 
@@ -1330,7 +1426,7 @@ class DocumentTrackerApp:
         if change_type == "META_UPDATE":
             return f"Metadata updated for '{new_value or old_value}': {note}"
         if change_type == "RESTORE":
-            return f"Restored previous snapshot for '{new_value or old_value or file_id}'."
+            return f"Restored previous revision for '{new_value or old_value or file_id}'."
         return f"{change_type} for file '{new_value or old_value or file_id}': {note}"
 
     def _sort_treeview(self, tree: ttk.Treeview, col: str, reverse: bool) -> bool:
@@ -1422,11 +1518,12 @@ class DocumentTrackerApp:
             new_name = name_entry.get().strip() or proj.project_name
             new_description = description_entry.get().strip()
             new_tags = tags_entry.get().strip()
+            name_changed = new_name != proj.project_name
 
             # Rename folder on disk if name changed
             old_folder = Path(proj.root_path)
             new_folder = old_folder.parent / new_name
-            if new_name != proj.project_name:
+            if name_changed:
                 if new_folder.exists():
                     messagebox.showwarning("Name conflict", f"A folder named '{new_name}' already exists.", parent=form)
                     return
@@ -1437,7 +1534,7 @@ class DocumentTrackerApp:
                     return
 
             timestamp = datetime.now().isoformat()
-            if new_name != proj.project_name:
+            if name_changed:
                 self.csv.append_row("change_log", ChangeRecord(
                     timestamp=timestamp, project_id=proj.project_id, file_id="",
                     change_type="RENAME", old_value=proj.project_name, new_value=new_name,
@@ -1462,14 +1559,14 @@ class DocumentTrackerApp:
                     row["project_name"] = new_name
                     row["description"] = new_description
                     row["tags"] = new_tags
-                    row["root_path"] = str(new_folder) if new_name != proj.project_name else proj.root_path
+                    row["root_path"] = str(new_folder) if name_changed else proj.root_path
                     break
             self.csv.write_rows("projects", project_rows)
 
             proj.project_name = new_name
             proj.description = new_description
             proj.tags = new_tags
-            if new_name != proj.project_name:
+            if name_changed:
                 proj.root_path = str(new_folder)
 
             self.refresh_projects()
@@ -1904,10 +2001,10 @@ class DocumentTrackerApp:
         snapshot_dir = self._snapshot_path_for_relative(project_id, relative_path)
         snapshot_dir.mkdir(parents=True, exist_ok=True)
         checksum = compute_checksum(file_path)
-        existing = [p for p in snapshot_dir.iterdir() if p.is_file() and f"__{checksum}" in p.name]
-        if existing:
+        existing = sorted([p for p in snapshot_dir.iterdir() if p.is_file()])
+        if existing and f"__{checksum}" in existing[-1].name:
             return
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         ext = file_path.suffix or ".bin"
         target = snapshot_dir / f"{stamp}__{checksum}{ext}"
         shutil.copy2(file_path, target)

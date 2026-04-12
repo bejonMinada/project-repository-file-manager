@@ -1,16 +1,20 @@
-# Project File Manager
+# Project File Manager 1.4
 
-Project File Manager is a local desktop application for organizing project folders, tracking files, logging file changes, and keeping project notes.
+Project File Manager is a local desktop application for organizing project folders, tracking files, comparing revisions, restoring snapshots, and keeping project notes in a responsive Tkinter workspace.
 
-All data is stored locally in CSV files inside the application folder. No cloud service or database is required.
+All data is stored locally in CSV files inside the application folder. No cloud service, external database, or internet connection is required for normal use.
+
+## About Dialog Description
+
+Project File Manager is shown in-app as a local desktop application for organizing project folders, tracking file changes, comparing revisions, restoring snapshots, and managing project notes in a responsive workspace. All data stays on the device with no cloud dependency.
 
 ## Features
 
 - Auto-detects project folders inside the built-in `repository` directory on launch and during global refresh.
 - Global `Refresh` scans the entire repository and updates all projects and tracked file records.
 - Snapshot support for tracked files (used by compare/restore workflows).
-- Diff view for text-readable files using previous snapshots.
-- Restore previous snapshot for a selected tracked file.
+- Diff view for text-readable files using previous snapshots, with metadata fallback for non-text files.
+- Restore previous revision for a selected tracked file.
 - Tracks files with checksum-based change detection (`ADD`, `REMOVE`, `MODIFY`, `MOVE`, `META_UPDATE`).
 - Lets you add both files and folders into a selected project.
 - File browser supports folder navigation with double-click to enter and `Back` to go up one level.
@@ -18,11 +22,13 @@ All data is stored locally in CSV files inside the application folder. No cloud 
 - Uses file-type icons (including a zipped-folder icon for compressed files).
 - Lets you open, rename, and remove tracked files/folders.
 - Recycle-bin behavior for removals (`recycle_bin/`) instead of immediate permanent deletion.
-- Project pin/favorite support and bulk tag editing for multiple selected projects.
+- Project pin/favorite support and per-project tag editing.
+- File browser supports queued `Copy File` and `Move File` actions, then `Copy Here` or `Move Here` on white-space in the destination folder view.
 - Advanced file filtering: filename, extension, and note text.
 - History filter by change type.
 - Backup export/import via ZIP.
 - Activity dashboard with totals and most active project.
+- Responsive right-side panel with scrollable Details, History, and Project Notes sections.
 - Keyboard shortcuts:
 	- `Ctrl+F`: focus file search
 	- `Ctrl+N`: add project
@@ -30,7 +36,7 @@ All data is stored locally in CSV files inside the application folder. No cloud 
 	- `Alt+Left`: back folder
 - Shows project change history and supports viewing history as a text file.
 - Supports per-project notes.
-- Includes reset functionality with confirmation text for full local data cleanup.
+- Includes reset functionality with confirmation text for full local data cleanup, including snapshots and recycle bin contents.
 
 ## Project Structure
 
@@ -77,13 +83,12 @@ The launcher will:
 - `Add Project`: creates a new project folder and project record.
 - `Refresh`: globally refreshes all repository projects and tracked files.
 - `Toggle Pin`: pin or unpin a project.
-- `Bulk Edit Tags`: apply tags to multiple selected projects.
 - `Edit Details`: updates project name/description/tags and logs relevant changes.
 - `View as Text File`: writes project history to a text file and opens it.
-- `Compare with Previous Snapshot`: opens a diff against previous saved snapshot.
-- `Restore Previous Snapshot`: rolls selected file back to a previous snapshot.
+- `Compare to Previous Revision`: saves the current revision when needed, then compares it against the previous saved revision or shows metadata comparison when text diff is not supported.
+- `Restore Previous Revision`: rolls the selected file back to the previous saved revision.
 - `Remove File/Folder`: removes selected file/folder from disk and tracking.
-- `Reset`: deletes all projects, tracked files, notes, and CSV records after confirmation.
+- `Reset`: deletes all projects, tracked files, notes, CSV records, snapshot revisions, and recycle bin contents after confirmation.
 
 ## Data Files
 
@@ -101,5 +106,5 @@ If legacy CSV files exist from an older location, they are migrated automaticall
 Use Python unittest:
 
 ```bash
-python -m unittest test_app.py
+python -m unittest app_test.py
 ```

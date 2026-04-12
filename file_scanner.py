@@ -18,11 +18,12 @@ def scan_project_files(root_path: Path, extensions: Optional[set[str]] = None) -
         if path.is_file():
             if extensions and path.suffix.lower() not in extensions:
                 continue
+            stat = path.stat()
             relative = path.relative_to(root_path)
             yield {
                 "relative_path": str(relative).replace("\\", "/"),
                 "extension": path.suffix.lower(),
-                "file_size": str(path.stat().st_size),
-                "last_modified": datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+                "file_size": str(stat.st_size),
+                "last_modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
                 "checksum": compute_checksum(path),
             }
