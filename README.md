@@ -33,8 +33,13 @@ Project File Manager is shown in-app as a local desktop application for organizi
 - Keyboard shortcuts:
 	- `Ctrl+F`: focus file search
 	- `Ctrl+N`: add project
+	- `Ctrl+C`: copy selected file/folder
+	- `Ctrl+X`: cut selected file/folder
+	- `Ctrl+V`: paste queued items
+	- `Ctrl+Z`: undo last supported file operation
+	- `Backspace`: go to parent folder
+	- `Delete`: remove selected file/folder or selected note
 	- `F5`: global refresh
-	- `Alt+Left`: back folder
 - Shows project change history and supports viewing history as a text file.
 - Supports per-project notes.
 - Includes reset functionality with confirmation text for full local data cleanup, including snapshots and recycle bin contents.
@@ -57,14 +62,24 @@ Project File Manager is shown in-app as a local desktop application for organizi
 ## Requirements
 
 - Windows
-- Python 3.10 or newer
+- No Python installation required when using the packaged `.exe`
+- Python 3.10 or newer only if running from source (`.py`/`.bat` path)
 
 ## How to Run
+
+### Recommended (for end users)
+
+1. Open the `dist` folder.
+2. Double-click `Project File Manager.exe`.
+
+This executable is self-contained and does not require installing Python or dependencies.
+
+### Alternative (developer/source mode)
 
 1. Open the app folder.
 2. Double-click `Project File Manager.bat`.
 
-The launcher will:
+The `.bat` launcher will:
 
 1. Ensure the `repository`, `snapshots`, and `recycle_bin` folders exist.
 2. Find Python (from venv, PATH, or common install locations).
@@ -101,6 +116,8 @@ The app stores data in these CSV files in the application folder:
 - `files.csv`
 - `change_log.csv`
 - `todos.csv`
+
+When running the packaged executable, data files are created beside the `.exe` on first launch.
 
 If legacy CSV files exist from an older location, they are migrated automatically on startup.
 
