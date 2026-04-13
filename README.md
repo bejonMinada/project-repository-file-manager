@@ -1,12 +1,12 @@
-# Project File Manager 2.0
+# Project Repository File Manager 3.0
 
-Project File Manager is a local desktop application for organizing project folders, tracking files, comparing revisions, restoring snapshots, and keeping project notes in a responsive Tkinter workspace.
+Project Repository File Manager is a local desktop application for organizing project folders, tracking files, comparing revisions, restoring snapshots, and keeping project notes in a responsive Tkinter workspace.
 
 All data is stored locally in CSV files inside the application folder. No cloud service, external database, or internet connection is required for normal use.
 
 ## About Dialog Description
 
-Project File Manager is shown in-app as a local desktop application for organizing project folders, tracking file changes, comparing revisions, restoring snapshots, and managing project notes in a responsive workspace. All data stays on the device with no cloud dependency.
+Project Repository File Manager is shown in-app as a local desktop application for organizing project folders, tracking file changes, comparing revisions, restoring snapshots, and managing project notes in a responsive workspace. All data stays on the device with no cloud dependency.
 
 ## Features
 
@@ -27,7 +27,11 @@ Project File Manager is shown in-app as a local desktop application for organizi
 - File browser supports queued `Copy File` and `Move File` actions, then `Copy Here` or `Move Here` on white-space in the destination folder view.
 - Advanced file filtering: filename, extension, and note text.
 - History filter by change type.
-- Backup export/import via ZIP.
+- Session capture/restore via ZIP (`Capture Session` / `Restore Session`) with default save/open path in backup `Session/`.
+- Auto-generated backup workspace folders: `Backups/` and `Session/`.
+- Restore project from auto-backup by selecting a timestamped backup folder.
+- Recycle-bin restore is project-scoped to prevent cross-project file mixing.
+- File context menu tools: `Extract Selected Archives Here`, `Compress Selected to ZIP`, and `Compress Folder to ZIP`.
 - Activity dashboard with totals and most active project.
 - Responsive right-side panel with scrollable Details, History, and Project Notes sections.
 - Keyboard shortcuts:
@@ -52,12 +56,23 @@ Project File Manager is shown in-app as a local desktop application for organizi
 - `csv_manager.py`: CSV creation/read/write helpers.
 - `file_scanner.py`: recursive file scanning and checksum generation.
 - `change_detector.py`: change comparison logic.
-- `Project File Manager.bat`: Windows launcher with Python detection and venv bootstrapping.
+- `Project Repository File Manager.bat`: Windows launcher with Python detection and venv bootstrapping.
 - `app_settings.json`: stores app settings such as custom repository path.
 - `repository/`: project folders tracked by the app.
 - `projects.csv`, `files.csv`, `change_log.csv`, `todos.csv`: local data files.
 - `snapshots/`: automatic file snapshots for compare/restore features.
 - `recycle_bin/`: removed files/folders before permanent cleanup.
+
+## Contributions
+
+Developers:
+
+- Bejon Minada
+
+Testers:
+
+- Bejon Minada
+- Anselmo Lacuesta II
 
 ## Requirements
 
@@ -70,14 +85,14 @@ Project File Manager is shown in-app as a local desktop application for organizi
 ### Recommended (for end users)
 
 1. Open the `dist` folder.
-2. Double-click `Project File Manager.exe`.
+2. Double-click `Project Repository File Manager.exe`.
 
 This executable is self-contained and does not require installing Python or dependencies.
 
 ### Alternative (developer/source mode)
 
 1. Open the app folder.
-2. Double-click `Project File Manager.bat`.
+2. Double-click `Project Repository File Manager.bat`.
 
 The `.bat` launcher will:
 
@@ -94,6 +109,49 @@ The `.bat` launcher will:
 3. Save to create the project folder under `repository`.
 4. Select the project and use `Add Files` or `Add Folder`.
 5. Use `Refresh` beside `Add Project` to globally rescan the repository.
+
+## SharePoint and OneDrive Setup Guide
+
+Use this process when your team stores project data in SharePoint and you want this app to work with locally synced paths.
+
+1. Create a SharePoint document library or choose an existing one.
+2. In that library, create two folders:
+	- `Repository` (project folders tracked by the app)
+	- `Backup` (for auto-backups and session archives)
+3. In SharePoint, open each folder and click `Add shortcut to OneDrive`.
+4. Wait for OneDrive sync to complete on your PC.
+5. In File Explorer, verify both synced folders appear under your OneDrive organization path.
+6. In the app, open `Settings` and set:
+	- `Repository Folder` = local synced path of your SharePoint `Repository`
+	- `Backup Folder` = local synced path of your SharePoint `Backup`
+7. Save settings and run `Refresh` once.
+
+Notes:
+- The app must use the local synced path from OneDrive, not a browser URL.
+- Keep repository and backup paths separate; do not set backup inside the repository path.
+
+## Backup Protection Best Practices
+
+To reduce accidental or unauthorized backup changes, apply these controls in SharePoint/OneDrive:
+
+1. Separate ownership:
+	- Assign one or two backup managers as folder Owners.
+	- Give normal users read-only access to the backup folder when possible.
+2. Limit edit/delete permissions:
+	- Remove `Edit` for users who only need restore visibility.
+	- Avoid granting broad `Full Control` at the parent site when not needed.
+3. Use versioning and recycle-bin retention:
+	- Enable document library version history.
+	- Confirm retention/recycle-bin policies are active.
+4. Restrict external sharing for backup content:
+	- Disable anonymous links and limit guest access for backup locations.
+5. Monitor access and alerts:
+	- Enable audit logs and configure alerts for delete or permission changes.
+6. Keep backup folder dedicated:
+	- Do not use the backup folder for everyday document collaboration.
+	- Store only auto-backup snapshots and session capture archives.
+7. Test restore regularly:
+	- Run a scheduled restore drill (for example monthly) to verify recovery readiness.
 
 ## Main Actions
 

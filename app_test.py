@@ -77,8 +77,21 @@ class ProjectFileManagerTests(unittest.TestCase):
         self.assertTrue(self.csv_manager.paths["files"].exists())
         self.assertTrue(self.csv_manager.paths["change_log"].exists())
         self.assertTrue(self.csv_manager.paths["todos"].exists())
-        project_headers = self.csv_manager.paths["projects"].read_text(encoding="utf-8").splitlines()[0]
-        self.assertIn("pinned", project_headers)
+        self.csv_manager.append_row(
+            "projects",
+            {
+                "project_id": "9",
+                "project_name": "HeaderCheck",
+                "root_path": "C:/repo/check",
+                "description": "",
+                "tags": "",
+                "pinned": "1",
+                "created_date": "",
+                "last_scanned_date": "",
+            },
+        )
+        rows = self.csv_manager.read_rows("projects")
+        self.assertEqual(rows[0].get("pinned"), "1")
 
     def test_csv_manager_append_write_read_and_next_id(self) -> None:
         row1 = {

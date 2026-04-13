@@ -3,6 +3,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 import tempfile
 import tkinter as tk
 import difflib
@@ -17,13 +18,17 @@ from csv_manager import CSVManager
 from file_scanner import compute_checksum, scan_project_files
 from models import ChangeRecord, Project, TrackedFile
 
-APP_VERSION = "2.0"
+APP_VERSION = "3.0"
 APP_SETTINGS_FILE = "app_settings.json"
+SHARED_REPO_SETTINGS_DIR = "Project Repository File Manager"
+SHARED_REPO_SETTINGS_FILE = "shared_settings.json"
+BACKUPS_SUBDIR = "Backups"
+SESSIONS_SUBDIR = "Session"
 
 class DocumentTrackerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Project File Manager")
+        self.root.title("Project Repository File Manager")
         self.folder_icon = tk.PhotoImage(width=16, height=16)
         self.folder_icon.put("#f7c600", to=(0, 5, 15, 15))
         self.folder_icon.put("#e0a800", to=(0, 3, 10, 7))
@@ -51,14 +56,21 @@ class DocumentTrackerApp:
             self.app_base_dir = Path(sys.executable).resolve().parent
         else:
             self.app_base_dir = Path(__file__).resolve().parent
-        self.csv = CSVManager(base_dir=self.app_base_dir)
         self.settings_path = self.app_base_dir / APP_SETTINGS_FILE
         self.repository_folder = self._load_repository_folder()
         self.repository_folder.mkdir(parents=True, exist_ok=True)
+        self.data_folder = self.repository_folder / SHARED_REPO_SETTINGS_DIR
+        self.data_folder.mkdir(parents=True, exist_ok=True)
+        self.csv = CSVManager(base_dir=self.data_folder)
+        self.backup_folder = self._load_backup_folder(self.repository_folder)
+        if self.backup_folder is not None:
+            self.backup_folder.mkdir(parents=True, exist_ok=True)
+            self._ensure_backup_subfolders(self.backup_folder)
         self.snapshots_folder = self.app_base_dir / "snapshots"
         self.snapshots_folder.mkdir(parents=True, exist_ok=True)
         self.recycle_bin_folder = self.app_base_dir / "recycle_bin"
         self.recycle_bin_folder.mkdir(parents=True, exist_ok=True)
+        self.recycle_manifest_path = self.recycle_bin_folder / "manifest.json"
         self.projects: List[Project] = []
         self.tracked_files: List[TrackedFile] = []
         self.selected_project: Optional[Project] = None
@@ -72,6 +84,9 @@ class DocumentTrackerApp:
             "projects": {"name": False, "tags": False},
             "files": {"path": False, "size": False, "modified": False},
         }
+        self._busy_started_at: Optional[float] = None
+        self._busy_hide_after_id: Optional[str] = None
+        self._busy_mode = "indeterminate"
         self.project_todos: dict[str, List[dict]] = {}
         self.project_tree_name_ratio = 0.68
         self.file_tree_name_ratio = 0.62
@@ -81,6 +96,9 @@ class DocumentTrackerApp:
         self._build_ui()
         self._bind_shortcuts()
         self.root.bind("<Configure>", self._on_window_resize)
+        self._ensure_backup_folder_configured()
+        if not self.root.winfo_exists():
+            return
         self._auto_sync_repository()
         self.refresh_projects()
 
@@ -93,13 +111,17 @@ class DocumentTrackerApp:
         top_frame = ttk.Frame(self.root, padding=(8, 4))
         top_frame.grid(row=0, column=0, sticky="ew")
         top_frame.columnconfigure(1, weight=1)
+        self.about_window_icon = self._create_info_icon()
+        self.settings_window_icon = self._create_gear_icon()
         ttk.Button(top_frame, text="About", command=self.show_about).grid(row=0, column=0, sticky="w")
         ttk.Button(top_frame, text="Settings", command=self.open_settings).grid(row=0, column=1, sticky="w", padx=(8, 0))
         self.data_actions_button = ttk.Menubutton(top_frame, text="Data Actions")
         self.data_actions_button.grid(row=0, column=2, sticky="e")
         self.data_actions_menu = tk.Menu(self.data_actions_button, tearoff=0)
-        self.data_actions_menu.add_command(label="Backup", command=self.export_backup)
-        self.data_actions_menu.add_command(label="Import", command=self.import_backup)
+        self.data_actions_menu.add_command(label="Capture Session (ZIP)", command=self.export_backup)
+        self.data_actions_menu.add_command(label="Restore Session (ZIP)", command=self.import_backup)
+        self.data_actions_menu.add_command(label="Restore Project from Auto-Backup", command=self.restore_project_from_backup)
+        self.data_actions_menu.add_command(label="Restore Recycle Bin Item", command=self.restore_recycle_item)
         self.data_actions_menu.add_separator()
         self.data_actions_menu.add_command(label="Reset", command=self.reset_all_data)
         self.data_actions_button["menu"] = self.data_actions_menu
@@ -134,12 +156,13 @@ class DocumentTrackerApp:
         self.project_search_entry.pack(side="left", fill="x", expand=True, padx=(4, 0))
         self.project_search_entry.bind("<KeyRelease>", lambda event: self.refresh_projects())
 
-        self.project_tree = ttk.Treeview(left_frame, columns=("name", "tags"), show="headings", height=20)
+        self.project_tree = ttk.Treeview(left_frame, columns=("name", "tags"), show="headings", height=20, selectmode="browse")
         self.project_tree.heading("name", text="Project Name", command=lambda: self._sort_project_tree("name"))
         self.project_tree.heading("tags", text="Tags", command=lambda: self._sort_project_tree("tags"))
         self.project_tree.column("name", width=120, anchor="w", stretch=False)
         self.project_tree.column("tags", width=60, anchor="w", stretch=False)
         self.project_tree.bind("<<TreeviewSelect>>", self.on_project_select)
+        self.project_tree.bind("<Button-1>", self._project_tree_click, add="+")
         self.project_tree.bind("<Double-1>", self.on_project_tree_double_click)
         self.project_tree.bind("<Button-3>", self.show_project_context_menu)
         self.project_tree.bind("<Configure>", lambda event: self._fit_project_tree_columns())
@@ -153,6 +176,9 @@ class DocumentTrackerApp:
         self.project_context_menu.add_command(label="Toggle Pin", command=self.toggle_project_pin)
         self.project_context_menu.add_separator()
         self.project_context_menu.add_command(label="Delete Project Folder", command=self.delete_project_folder)
+
+        self.project_empty_context_menu = tk.Menu(self.root, tearoff=0)
+        self.project_empty_context_menu.add_command(label="Add Project", command=self.add_project)
 
         project_buttons = ttk.Frame(left_frame)
         project_buttons.pack(fill="x", pady=(8, 0))
@@ -173,7 +199,7 @@ class DocumentTrackerApp:
         self.extension_combo.grid(row=0, column=3, sticky="w", padx=4)
         self.extension_combo['values'] = [""]
         self.extension_combo.bind("<<ComboboxSelected>>", lambda event: self.refresh_files())
-        ttk.Label(filter_frame, text="Note contains:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(filter_frame, text="File notes contain:").grid(row=1, column=0, sticky="w", pady=(6, 0))
         self.note_filter_entry = ttk.Entry(filter_frame)
         self.note_filter_entry.grid(row=1, column=1, sticky="ew", padx=4, pady=(6, 0))
         self.note_filter_entry.bind("<KeyRelease>", lambda event: self.refresh_files())
@@ -192,6 +218,9 @@ class DocumentTrackerApp:
         self.file_tree_base_size_width = 100
         self.file_tree_base_modified_width = 170
         self.file_tree.bind("<<TreeviewSelect>>", self.on_file_select)
+        self.file_tree.bind("<Button-1>", self._file_tree_click, add="+")
+        self.file_tree.bind("<Control-Button-1>", self._file_tree_ctrl_click, add="+")
+        self.file_tree.bind("<Shift-Button-1>", self._file_tree_shift_click, add="+")
         self.file_tree.bind("<Double-1>", self.on_file_double_click)
         self.file_tree.bind("<Button-3>", self.show_file_context_menu)
         self.file_tree.bind("<Configure>", lambda event: self._fit_file_tree_columns())
@@ -199,15 +228,18 @@ class DocumentTrackerApp:
         self.root.after(0, self._fit_file_tree_columns)
 
         self.file_context_menu = tk.Menu(self.root, tearoff=0)
-        self.file_context_menu.add_command(label="Add/Edit Notes", command=self.add_file_note)
+        self.file_context_menu.add_command(label="Add/Edit File Notes", command=self.add_file_note)
         self.file_context_menu.add_command(label="Open File", command=self.open_file)
         self.file_context_menu.add_command(label="Rename File", command=self.rename_file)
         self.file_context_menu.add_command(label="Copy File", command=self.copy_selected_items)
         self.file_context_menu.add_command(label="Move File", command=self.move_selected_items)
+        self.file_context_menu.add_command(label="Extract Selected Archives Here", command=self.extract_selected_archives_here)
+        self.file_context_menu.add_command(label="Compress Selected to ZIP...", command=self.compress_selected_items_to_zip)
+        self.file_context_menu.add_command(label="Compress Folder to ZIP", command=self.compress_selected_folders_to_zip)
         self.file_context_menu.add_command(label="Compare to Previous Revision", command=self.compare_to_previous_revision)
         self.file_context_menu.add_command(label="Restore Previous Revision", command=self.restore_previous_revision)
         self.file_context_menu.add_separator()
-        self.file_context_menu.add_command(label="Remove File/Folder", command=self.remove_item)
+        self.file_context_menu.add_command(label="Remove Selected", command=self.remove_item)
 
         self.file_destination_menu = tk.Menu(self.root, tearoff=0)
 
@@ -219,6 +251,28 @@ class DocumentTrackerApp:
         self.add_folder_button.pack(side="left", padx=(4, 0))
         self.back_button = ttk.Button(file_buttons, text="Back", command=self.go_back_folder)
         self.back_button.pack(side="left", padx=(4, 0))
+
+        # Keep the progress controls in the existing bottom action row so the
+        # layout stays stable during long-running operations.
+        self.busy_container = ttk.Frame(file_buttons)
+        self.busy_container.pack(side="right", padx=(4, 0))
+        self.busy_message_var = tk.StringVar(value="")
+        self.busy_detail_var = tk.StringVar(value="")
+
+        self.busy_label = ttk.Label(self.busy_container, textvariable=self.busy_message_var)
+        self.busy_label.pack(side="left", padx=(0, 6))
+
+        self.busy_progress = ttk.Progressbar(
+            self.busy_container,
+            orient=tk.HORIZONTAL,
+            mode="indeterminate",
+            length=180,
+            maximum=100,
+        )
+        self.busy_progress.pack(side="left", padx=(0, 6))
+
+        self.busy_detail_label = ttk.Label(self.busy_container, textvariable=self.busy_detail_var, width=12)
+        self.busy_detail_label.pack(side="left")
 
         self.dashboard_frame = ttk.Frame(right_frame)
         self.dashboard_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
@@ -287,17 +341,17 @@ class DocumentTrackerApp:
         detail_label.pack(anchor="w")
         self.details_text = tk.Text(self.content_frame, height=10, wrap="word", state="disabled")
         self.details_text_base_height = 10
-        self.details_text.pack(fill="both", expand=True, pady=(0, 4))
+        self.details_text.pack(fill="both", expand=True, padx=(0, 4), pady=(0, 4))
         history_label = ttk.Label(self.content_frame, text="Project Change History")
         history_label.pack(anchor="w", pady=(2, 0))
         self.history_filter_combo = ttk.Combobox(self.content_frame, state="readonly", width=20)
-        self.history_filter_combo["values"] = ["ALL", "ADD", "REMOVE", "MODIFY", "MOVE", "META_UPDATE", "NOTE", "EDIT", "RENAME", "RESTORE"]
+        self.history_filter_combo["values"] = ["ALL", "ADD", "REMOVE", "MODIFY", "MOVE", "META_UPDATE", "NOTE", "EDIT", "RENAME", "RESTORE", "MANUAL_REMOVE", "NOTE_ADD", "NOTE_EDIT", "NOTE_REMOVE"]
         self.history_filter_combo.set("ALL")
         self.history_filter_combo.bind("<<ComboboxSelected>>", lambda event: self._show_history())
         self.history_filter_combo.pack(anchor="w", pady=(2, 2))
         self.history_text = tk.Text(self.content_frame, height=10, wrap="word", state="disabled")
         self.history_text_base_height = 10
-        self.history_text.pack(fill="both", expand=True, pady=(0, 4))
+        self.history_text.pack(fill="both", expand=True, padx=(0, 4), pady=(0, 4))
         history_button_frame = ttk.Frame(self.content_frame)
         history_button_frame.pack(fill="x", pady=(0, 4))
         self.view_history_button = ttk.Button(history_button_frame, text="View as Text File", command=self.print_project_history)
@@ -305,13 +359,21 @@ class DocumentTrackerApp:
 
         todo_label = ttk.Label(self.content_frame, text="Project Notes")
         todo_label.pack(anchor="w", pady=(2, 0))
-        self.todo_listbox = tk.Listbox(self.content_frame)
+        self.todo_listbox = tk.Listbox(self.content_frame, selectmode="extended")
         self.todo_listbox_base_height = 10
-        self.todo_listbox.pack(fill="both", expand=True, pady=(0, 4))
+        self.todo_listbox.pack(fill="both", expand=True, padx=(0, 4), pady=(0, 4))
+        self.todo_listbox.bind("<Button-1>", self._todo_listbox_click)
+        self.todo_listbox.bind("<Control-Button-1>", self._todo_listbox_ctrl_click)
+        self.todo_listbox.bind("<Shift-Button-1>", self._todo_listbox_shift_click)
         self.todo_listbox.bind("<Button-3>", self.show_todo_context_menu)
+        self.todo_listbox.bind("<Double-1>", lambda event: self.open_todo_item())
         self.todo_context_menu = tk.Menu(self.root, tearoff=0)
-        self.todo_context_menu.add_command(label="Edit Note", command=self.edit_todo_item)
+        self.todo_context_menu.add_command(label="Open/Edit Note", command=self.open_todo_item)
+        self.todo_context_menu.add_separator()
+        self.todo_context_menu.add_command(label="Add Note", command=self.add_todo_item)
         self.todo_context_menu.add_command(label="Remove Note", command=self.remove_todo_item)
+        self.todo_empty_context_menu = tk.Menu(self.root, tearoff=0)
+        self.todo_empty_context_menu.add_command(label="Add Note", command=self.add_todo_item)
         todo_buttons_frame = ttk.Frame(self.content_frame)
         todo_buttons_frame.pack(fill="x", pady=(0, 0))
         self.add_note_button = ttk.Button(todo_buttons_frame, text="Add Note", command=self.add_todo_item)
@@ -320,6 +382,8 @@ class DocumentTrackerApp:
         self.remove_note_button.pack(side="left", padx=(4, 0))
         self._bind_right_panel_mousewheel(right_frame)
         self._update_file_action_buttons_state()
+        # Ensure progress bar starts in idle state (no animation or fill)
+        self._hide_busy_widgets()
 
     def _bind_right_panel_mousewheel(self, widget: tk.Misc) -> None:
         widget.bind("<MouseWheel>", self._on_right_panel_mousewheel, add="+")
@@ -327,6 +391,67 @@ class DocumentTrackerApp:
         widget.bind("<Button-5>", self._on_right_panel_mousewheel, add="+")
         for child in widget.winfo_children():
             self._bind_right_panel_mousewheel(child)
+
+    def _set_busy(self, is_busy: bool, message: str = "Processing...") -> None:
+        if is_busy:
+            if self._busy_hide_after_id is not None:
+                self.root.after_cancel(self._busy_hide_after_id)
+                self._busy_hide_after_id = None
+            if self._busy_started_at is None:
+                self._busy_started_at = time.monotonic()
+
+            self.busy_message_var.set(message)
+            self.busy_detail_var.set("")
+            self._busy_mode = "indeterminate"
+            self.busy_progress.configure(length=180)
+            self.busy_progress.stop()
+            self.busy_progress.configure(mode="indeterminate", maximum=100)
+            self.busy_progress["value"] = 0
+            self.busy_progress.start(12)
+
+            self.root.configure(cursor="watch")
+            self.root.update_idletasks()
+        else:
+            min_visible_seconds = 0.50
+            if self._busy_started_at is None:
+                self._hide_busy_widgets()
+            else:
+                elapsed = time.monotonic() - self._busy_started_at
+                remaining_ms = int(max(0.0, (min_visible_seconds - elapsed) * 1000))
+                if remaining_ms > 0:
+                    self._busy_hide_after_id = self.root.after(remaining_ms, self._hide_busy_widgets)
+                else:
+                    self._hide_busy_widgets()
+
+    def _set_busy_progress(self, value: float, maximum: Optional[float] = None, message: Optional[str] = None) -> None:
+        if maximum is not None:
+            self.busy_progress.configure(maximum=max(1, maximum))
+        if self._busy_mode != "determinate":
+            self.busy_progress.stop()
+            self.busy_progress.configure(mode="determinate")
+            self._busy_mode = "determinate"
+
+        max_value = float(self.busy_progress.cget("maximum"))
+        clamped_value = max(0.0, min(value, max_value))
+        self.busy_progress["value"] = clamped_value
+        if message is not None:
+            self.busy_message_var.set(message)
+        if max_value > 0:
+            self.busy_detail_var.set(f"{int(clamped_value)} / {int(max_value)}")
+        else:
+            self.busy_detail_var.set("")
+        self.root.update_idletasks()
+
+    def _hide_busy_widgets(self) -> None:
+        self._busy_hide_after_id = None
+        self._busy_started_at = None
+        self._busy_mode = "indeterminate"
+        self.busy_progress.stop()
+        self.busy_progress.configure(length=0, mode="indeterminate", maximum=100)
+        self.busy_progress["value"] = 0
+        self.busy_message_var.set("")
+        self.busy_detail_var.set("")
+        self.root.configure(cursor="")
 
     def _on_right_panel_mousewheel(self, event: tk.Event) -> str:
         if getattr(event, "num", None) == 4:
@@ -347,7 +472,8 @@ class DocumentTrackerApp:
     def refresh_projects(self) -> None:
         self.project_tree.delete(*self.project_tree.get_children())
         search_terms = [term for term in self.project_search_entry.get().strip().lower().split() if term]
-        self.projects = [Project.from_dict(row) for row in self.csv.read_rows("projects")]
+        project_rows = [row for row in self.csv.read_rows("projects") if not self._is_internal_project_row(row)]
+        self.projects = [Project.from_dict(row) for row in project_rows]
         self.projects.sort(key=lambda p: (p.pinned != "1", p.project_name.lower()))
         for project in self.projects:
             project_text = f"{project.project_name} {project.tags} {project.root_path}".lower()
@@ -356,6 +482,9 @@ class DocumentTrackerApp:
             display_name = f"* {project.project_name}" if project.pinned == "1" else project.project_name
             self.project_tree.insert("", "end", iid=project.project_id, values=(display_name, project.tags))
         self._update_dashboard()
+
+    def _is_internal_project_row(self, row: dict[str, str]) -> bool:
+        return row.get("project_name", "") == SHARED_REPO_SETTINGS_DIR or Path(row.get("root_path", "")).name == SHARED_REPO_SETTINGS_DIR
 
     def go_to_folder_directory(self) -> None:
         if not self.selected_project:
@@ -396,16 +525,134 @@ class DocumentTrackerApp:
             candidate = candidate.resolve()
         return candidate
 
-    def _save_repository_folder_setting(self, folder: Path) -> None:
-        payload = {"repository_path": str(folder)}
-        self.settings_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    def _shared_repo_settings_path(self, repository_folder: Path) -> Path:
+        return repository_folder / SHARED_REPO_SETTINGS_DIR / SHARED_REPO_SETTINGS_FILE
 
-    def open_settings(self) -> None:
+    def _ensure_backup_subfolders(self, backup_folder: Path) -> None:
+        backup_workspace = backup_folder.resolve() / SHARED_REPO_SETTINGS_DIR
+        (backup_workspace / BACKUPS_SUBDIR).mkdir(parents=True, exist_ok=True)
+        (backup_workspace / SESSIONS_SUBDIR).mkdir(parents=True, exist_ok=True)
+
+    def _session_archive_root(self) -> Optional[Path]:
+        if not self.backup_folder:
+            return None
+        session_root = self.backup_folder.resolve() / SHARED_REPO_SETTINGS_DIR / SESSIONS_SUBDIR
+        session_root.mkdir(parents=True, exist_ok=True)
+        return session_root
+
+    def _load_shared_backup_folder(self, repository_folder: Path) -> Optional[Path]:
+        settings_path = self._shared_repo_settings_path(repository_folder)
+        if not settings_path.exists():
+            return None
+
+        try:
+            data = json.loads(settings_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+        raw_path = str(data.get("backup_path", "")).strip()
+        if not raw_path:
+            return None
+
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = (repository_folder / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+        return candidate
+
+    def _load_backup_folder(self, repository_folder: Optional[Path] = None) -> Optional[Path]:
+        local_backup: Optional[Path] = None
+        if self.settings_path.exists():
+            try:
+                data = json.loads(self.settings_path.read_text(encoding="utf-8"))
+                raw_path = str(data.get("backup_path", "")).strip()
+                if raw_path:
+                    candidate = Path(raw_path).expanduser()
+                    if not candidate.is_absolute():
+                        candidate = (self.app_base_dir / candidate).resolve()
+                    else:
+                        candidate = candidate.resolve()
+                    local_backup = candidate
+            except Exception:
+                pass
+
+        if repository_folder is None:
+            return local_backup
+
+        shared_backup = self._load_shared_backup_folder(repository_folder)
+        if shared_backup is not None:
+            if local_backup is None or local_backup != shared_backup:
+                self._save_settings(repository_folder, shared_backup, write_shared=False)
+            return shared_backup
+        return local_backup
+
+    def _write_shared_backup_folder(self, repository_folder: Path, backup_folder: Path) -> None:
+        shared_path = self._shared_repo_settings_path(repository_folder)
+        shared_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "backup_path": str(backup_folder),
+            "updated_at": datetime.now().isoformat(),
+        }
+        shared_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _save_settings(self, repository_folder: Path, backup_folder: Path, write_shared: bool = True) -> None:
+        payload = {
+            "repository_path": str(repository_folder),
+            "backup_path": str(backup_folder),
+        }
+        self.settings_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        if write_shared:
+            self._write_shared_backup_folder(repository_folder, backup_folder)
+
+    def _paths_overlap(self, path_a: Path, path_b: Path) -> bool:
+        return path_a == path_b or path_a in path_b.parents or path_b in path_a.parents
+
+    def _find_project_by_id(self, project_id: str) -> Optional[Project]:
+        return next((project for project in self.projects if project.project_id == project_id), None)
+
+    def _load_recycle_manifest(self) -> List[dict[str, str]]:
+        if not self.recycle_manifest_path.exists():
+            return []
+        try:
+            payload = json.loads(self.recycle_manifest_path.read_text(encoding="utf-8"))
+            if isinstance(payload, list):
+                return [entry for entry in payload if isinstance(entry, dict)]
+        except Exception:
+            pass
+        return []
+
+    def _save_recycle_manifest(self, rows: List[dict[str, str]]) -> None:
+        self.recycle_manifest_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+
+    def _ensure_backup_folder_configured(self) -> None:
+        if self.backup_folder and not self._paths_overlap(self.repository_folder.resolve(), self.backup_folder.resolve()):
+            return
+
+        messagebox.showwarning(
+            "Backup folder required",
+            "A backup folder is required before using the app. Set it in Settings.",
+            parent=self.root,
+        )
+        self.open_settings(force_backup=True)
+
+        if self.backup_folder and not self._paths_overlap(self.repository_folder.resolve(), self.backup_folder.resolve()):
+            return
+
+        messagebox.showerror(
+            "Startup blocked",
+            "Backup folder was not configured. The app will now close.",
+            parent=self.root,
+        )
+        self.root.destroy()
+
+    def open_settings(self, force_backup: bool = False) -> None:
         dialog = tk.Toplevel(self.root)
         dialog.title("Settings")
+        dialog.iconphoto(False, self.settings_window_icon)
         dialog.transient(self.root)
         dialog.grab_set()
-        dialog.geometry("720x170")
+        dialog.geometry("760x250")
         dialog.resizable(False, False)
 
         ttk.Label(dialog, text="Repository Folder:").pack(anchor="w", padx=12, pady=(12, 4))
@@ -413,8 +660,7 @@ class DocumentTrackerApp:
 
         path_row = ttk.Frame(dialog)
         path_row.pack(fill="x", padx=12)
-        path_entry = ttk.Entry(path_row, textvariable=path_var)
-        path_entry.pack(side="left", fill="x", expand=True)
+        ttk.Entry(path_row, textvariable=path_var).pack(side="left", fill="x", expand=True)
 
         def browse_folder() -> None:
             selected = filedialog.askdirectory(
@@ -423,12 +669,32 @@ class DocumentTrackerApp:
             )
             if selected:
                 path_var.set(selected)
+                shared_backup = self._load_shared_backup_folder(Path(selected).expanduser().resolve())
+                if shared_backup is not None:
+                    backup_var.set(str(shared_backup))
 
         ttk.Button(path_row, text="Browse", command=browse_folder).pack(side="left", padx=(8, 0))
 
+        ttk.Label(dialog, text="Backup Folder (required):").pack(anchor="w", padx=12, pady=(10, 4))
+        backup_var = tk.StringVar(value=str(self.backup_folder) if self.backup_folder else "")
+
+        backup_row = ttk.Frame(dialog)
+        backup_row.pack(fill="x", padx=12)
+        ttk.Entry(backup_row, textvariable=backup_var).pack(side="left", fill="x", expand=True)
+
+        def browse_backup_folder() -> None:
+            selected = filedialog.askdirectory(
+                title="Select backup folder",
+                initialdir=backup_var.get() or str(self.app_base_dir),
+            )
+            if selected:
+                backup_var.set(selected)
+
+        ttk.Button(backup_row, text="Browse", command=browse_backup_folder).pack(side="left", padx=(8, 0))
+
         ttk.Label(
             dialog,
-            text="Tip: You can select a OneDrive-synced SharePoint folder here.",
+            text="Tip: Backup folder must be outside the repository folder.",
         ).pack(anchor="w", padx=12, pady=(8, 0))
 
         button_row = ttk.Frame(dialog)
@@ -440,38 +706,68 @@ class DocumentTrackerApp:
                 messagebox.showwarning("Settings", "Please choose a repository folder.", parent=dialog)
                 return
 
+            target = target.resolve()
+
+            backup_input = backup_var.get().strip()
+            if not backup_input:
+                shared_backup = self._load_shared_backup_folder(target)
+                if shared_backup is not None:
+                    backup_var.set(str(shared_backup))
+                    backup_input = str(shared_backup)
+                else:
+                    messagebox.showwarning("Settings", "Please choose a backup folder.", parent=dialog)
+                    return
+
+            backup_target = Path(backup_input).expanduser()
+
             try:
                 target.mkdir(parents=True, exist_ok=True)
                 target = target.resolve()
-                self._save_repository_folder_setting(target)
+                backup_target.mkdir(parents=True, exist_ok=True)
+                backup_target = backup_target.resolve()
+                if self._paths_overlap(target, backup_target):
+                    messagebox.showerror(
+                        "Settings",
+                        "Backup folder cannot be the same as repository folder or inside it.",
+                        parent=dialog,
+                    )
+                    return
+                self._save_settings(target, backup_target)
+                self._ensure_backup_subfolders(backup_target)
             except Exception as exc:
-                messagebox.showerror("Settings", f"Could not save repository path: {exc}", parent=dialog)
+                messagebox.showerror("Settings", f"Could not save settings: {exc}", parent=dialog)
                 return
 
             if target != self.repository_folder:
                 self.repository_folder = target
+                self.data_folder = self.repository_folder / SHARED_REPO_SETTINGS_DIR
+                self.data_folder.mkdir(parents=True, exist_ok=True)
+                self.csv = CSVManager(base_dir=self.data_folder)
                 self.selected_project = None
                 self.selected_file = None
                 self.current_folder_rel = ""
                 self.pending_file_operation = None
                 self.refresh_repository()
 
+            self.backup_folder = backup_target
+
             dialog.destroy()
 
         ttk.Button(button_row, text="Save", command=save_settings).pack(side="right")
-        ttk.Button(button_row, text="Cancel", command=dialog.destroy).pack(side="right", padx=(0, 8))
+        if not force_backup:
+            ttk.Button(button_row, text="Cancel", command=dialog.destroy).pack(side="right", padx=(0, 8))
         dialog.wait_window()
 
     def show_about(self) -> None:
         about_text = (
-            f"Project File Manager\n"
+            f"Project Repository File Manager\n"
             f"Version {APP_VERSION}\n\n"
             "Overview\n"
             "A local first desktop application for organizing project folders, tracking file changes, comparing revisions, "
             "restoring snapshots, and managing notes. The repository can be set to local folders or cloud synced folders such as OneDrive, SharePoint synced libraries, and similar services.\n\n"
             "Latest Functions\n"
             "- Configurable repository location in Settings\n"
-            "- Data Actions menu for Backup, Import, and Reset\n"
+                "- Data Actions menu for Capture Session, Restore Session, and Reset\n"
             "- Automatic runtime folder creation on startup\n"
             "- Compare and restore previous file revisions\n"
             "- Queue based copy and move for selected files and folders\n"
@@ -484,8 +780,9 @@ class DocumentTrackerApp:
             "3. Open folders by double clicking folder rows, then press Back or Backspace to go up one level.\n"
             "4. Use right click on a file for rename, notes, compare, restore, copy, move, or remove.\n"
             "5. Use right click on empty space to paste, create a new file, or create a new folder.\n"
-            "6. Use Data Actions for backup, import, and full reset.\n"
-            "7. Use Settings to change the repository location.\n\n"
+                "6. Use Data Actions to capture the current session, restore a saved session, and run a full reset.\n"
+            "7. Use Settings to change repository and backup paths (supports OneDrive shortcuts from SharePoint).\n"
+            "8. For SharePoint + backup protection best practices, see README.md.\n\n"
             "Keyboard Shortcuts\n"
             "- Ctrl+F: focus file search\n"
             "- Ctrl+N: add project\n"
@@ -496,13 +793,39 @@ class DocumentTrackerApp:
             "- Delete: remove selected file or folder\n"
             "- Backspace: go to parent folder\n"
             "- F5: refresh repository\n\n"
-            "Developer: Bejon Minada\n\n"
+            "Developers:\n"
+            "Bejon Minada\n\n"
+            "Testers:\n"
+            "Bejon Minada\n"
+            "Anselmo Lacuesta II\n\n"
             f"Main repository folder:\n{self.repository_folder}"
         )
-        messagebox.showinfo(
-            "About",
-            about_text,
-        )
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("About")
+        dialog.iconphoto(False, self.about_window_icon)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.geometry("760x560")
+        dialog.minsize(600, 420)
+
+        text_frame = ttk.Frame(dialog, padding=(10, 10))
+        text_frame.pack(fill="both", expand=True)
+
+        about_body = tk.Text(text_frame, wrap="word")
+        about_body.pack(side="left", fill="both", expand=True)
+        about_body.insert("1.0", about_text)
+        about_body.configure(state="disabled")
+
+        scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=about_body.yview)
+        scrollbar.pack(side="right", fill="y")
+        about_body.configure(yscrollcommand=scrollbar.set)
+
+        button_row = ttk.Frame(dialog, padding=(10, 0, 10, 10))
+        button_row.pack(fill="x")
+        ttk.Button(button_row, text="Close", command=dialog.destroy).pack(side="right")
+
+        dialog.wait_window()
 
     def reset_all_data(self) -> None:
         confirm_dialog = tk.Toplevel(self.root)
@@ -528,9 +851,16 @@ class DocumentTrackerApp:
             if confirm_entry.get().strip() != "CLEAR ALL DATA":
                 messagebox.showwarning("Incorrect", "You must type exactly: CLEAR ALL DATA", parent=confirm_dialog)
                 return
+            try:
+                backup_dir = self._create_auto_backup("reset")
+            except Exception as exc:
+                messagebox.showerror("Auto Backup", f"Could not create backup before reset: {exc}", parent=confirm_dialog)
+                return
             confirm_dialog.destroy()
-            # Delete all project folders on disk
+            # Delete all project folders on disk (excluding internal project rows)
             for row in self.csv.read_rows("projects"):
+                if self._is_internal_project_row(row):
+                    continue
                 folder = Path(row.get("root_path", ""))
                 if folder.exists() and folder.is_dir():
                     try:
@@ -551,7 +881,7 @@ class DocumentTrackerApp:
                         pass
 
             # Clear all CSV tables
-            for table in ("projects", "files", "change_log", "todos"):
+            for table in ("projects", "files", "change_log", "todos", "item_inventory"):
                 self.csv.write_rows(table, [])
             self.selected_project = None
             self.selected_file = None
@@ -568,12 +898,14 @@ class DocumentTrackerApp:
             self.history_text.delete("1.0", tk.END)
             self.history_text.config(state="disabled")
             self.todo_listbox.delete(0, tk.END)
+            messagebox.showinfo("Reset complete", f"Data reset complete. Auto backup saved to:\n{backup_dir}")
 
         ttk.Button(button_frame, text="Reset", command=do_reset).pack(side="left", padx=(0, 8))
         ttk.Button(button_frame, text="Cancel", command=confirm_dialog.destroy).pack(side="left")
         confirm_dialog.wait_window()
 
     def on_project_select(self, event: object) -> None:
+        previous_project_id = self.selected_project.project_id if self.selected_project else ""
         selection = self.project_tree.selection()
         if not selection:
             self.selected_project = None
@@ -586,12 +918,51 @@ class DocumentTrackerApp:
         if self.pending_file_operation and self.pending_file_operation.get("project_id") != project_id:
             self.pending_file_operation = None
         if self.selected_project:
-            self.current_folder_rel = ""
+            if previous_project_id != project_id:
+                self.current_folder_rel = ""
             self._sync_untracked_files()
             self._load_project_todos()
             self._update_file_action_buttons_state()
         self.refresh_files()
         self._show_history()
+
+    def _clear_section_selections(self, active_section: str) -> None:
+        if active_section != "files":
+            self.file_tree.selection_remove(self.file_tree.selection())
+        if active_section != "todos":
+            self.todo_listbox.selection_clear(0, tk.END)
+
+    def _project_tree_click(self, event: tk.Event) -> None:
+        self._clear_section_selections("projects")
+
+    def _file_tree_click(self, event: tk.Event) -> None:
+        self._clear_section_selections("files")
+
+    def _file_tree_ctrl_click(self, event: tk.Event) -> str | None:
+        self._clear_section_selections("files")
+        item_id = self.file_tree.identify_row(event.y)
+        if not item_id:
+            return None
+        selected = set(self.file_tree.selection())
+        if item_id in selected:
+            self.file_tree.selection_remove(item_id)
+        else:
+            self.file_tree.selection_add(item_id)
+            self.file_tree.focus(item_id)
+        self.on_file_select(None)
+        return "break"
+
+    def _file_tree_shift_click(self, event: tk.Event) -> str | None:
+        self._clear_section_selections("files")
+        item_id = self.file_tree.identify_row(event.y)
+        if not item_id:
+            return None
+        # Shift-click on an already selected item toggles it off.
+        if item_id in self.file_tree.selection():
+            self.file_tree.selection_remove(item_id)
+            self.on_file_select(None)
+            return "break"
+        return None
 
     def toggle_project_pin(self) -> None:
         if not self.selected_project:
@@ -748,13 +1119,15 @@ class DocumentTrackerApp:
                 return
 
         try:
+            self._set_busy(True, "Copying folder contents...")
             shutil.copytree(source_folder, destination_folder)
+            self._sync_untracked_files()
+            self.refresh_files()
         except Exception as exc:
             messagebox.showerror("Copy failed", f"Unable to add folder: {exc}")
             return
-
-        self._sync_untracked_files()
-        self.refresh_files()
+        finally:
+            self._set_busy(False)
 
     def _copy_file_to_project(self, source_path: Path, project_root: Path) -> Optional[Path]:
         destination = project_root / source_path.name
@@ -837,6 +1210,14 @@ class DocumentTrackerApp:
             current_dir = project_root
 
         tracked_by_rel = {file.relative_path: file for file in files}
+        note_matched_rel_paths: set[str] = set()
+        if note_filter:
+            note_matched_rel_paths = {
+                file.relative_path
+                for file in files
+                if note_filter in (file.notes or "").lower()
+            }
+
         for item_path in sorted(current_dir.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
             relative = str(item_path.relative_to(project_root)).replace("\\", "/")
             item_name = item_path.name
@@ -845,6 +1226,13 @@ class DocumentTrackerApp:
                 continue
 
             if item_path.is_dir():
+                if note_filter:
+                    folder_prefix = f"{relative}/"
+                    has_matching_note_file = any(
+                        rel_path.startswith(folder_prefix) for rel_path in note_matched_rel_paths
+                    )
+                    if not has_matching_note_file:
+                        continue
                 self.file_tree.insert("", "end", iid=f"folder::{relative}", text=item_name, image=self.tree_folder_icon, values=("", ""))
                 continue
 
@@ -852,7 +1240,7 @@ class DocumentTrackerApp:
             extension = (tracked.extension if tracked else item_path.suffix.lower()) or ""
             if selected_ext and extension.lower() != selected_ext:
                 continue
-            if note_filter and tracked and note_filter not in (tracked.notes or "").lower():
+            if note_filter and (not tracked or note_filter not in (tracked.notes or "").lower()):
                 continue
             file_size = tracked.file_size if tracked else item_path.stat().st_size
             modified = tracked.last_modified if tracked else datetime.fromtimestamp(item_path.stat().st_mtime).isoformat()
@@ -1037,6 +1425,30 @@ class DocumentTrackerApp:
             icon.put("#9e9e9e", to=(3, 9, 10, 9))
         return icon
 
+    def _create_info_icon(self) -> tk.PhotoImage:
+        icon = tk.PhotoImage(width=14, height=14)
+        icon.put("#1f6feb", to=(1, 1, 12, 12))
+        icon.put("#ffffff", to=(6, 3, 7, 3))
+        icon.put("#ffffff", to=(6, 5, 7, 10))
+        return icon
+
+    def _create_gear_icon(self) -> tk.PhotoImage:
+        icon = tk.PhotoImage(width=14, height=14)
+        # Simple pixel gear: teeth plus center hub.
+        gear_color = "#5f6368"
+        hub_color = "#e8eaed"
+        icon.put(gear_color, to=(5, 1, 8, 2))
+        icon.put(gear_color, to=(5, 11, 8, 12))
+        icon.put(gear_color, to=(1, 5, 2, 8))
+        icon.put(gear_color, to=(11, 5, 12, 8))
+        icon.put(gear_color, to=(3, 3, 4, 4))
+        icon.put(gear_color, to=(9, 3, 10, 4))
+        icon.put(gear_color, to=(3, 9, 4, 10))
+        icon.put(gear_color, to=(9, 9, 10, 10))
+        icon.put(gear_color, to=(4, 4, 9, 9))
+        icon.put(hub_color, to=(6, 6, 7, 7))
+        return icon
+
     def _icon_for_extension(self, extension: str) -> tk.PhotoImage:
         ext = extension.lower().strip()
         if ext in {".py", ".pyw"}:
@@ -1111,7 +1523,7 @@ class DocumentTrackerApp:
             f"Size: {self.selected_file.file_size} bytes\n"
             f"Last Modified: {formatted_modified}\n"
             f"Checksum: {self.selected_file.checksum}\n"
-            f"Notes: {self.selected_file.notes}\n"
+            f"File Notes: {self.selected_file.notes}\n"
         )
         self.details_text.insert(tk.END, details)
         self.details_text.config(state="disabled")
@@ -1145,44 +1557,120 @@ class DocumentTrackerApp:
             return
         todos = self.project_todos.get(self.selected_project.project_id, [])
         for todo in todos:
-            self.todo_listbox.insert(tk.END, todo.get("description", ""))
+            title = todo.get("title", "").strip() or todo.get("description", "")[:60]
+            self.todo_listbox.insert(tk.END, title)
+
+    def _note_popup(self, title_init: str = "", desc_init: str = "", read_only: bool = False, window_title: str = "Note") -> tuple[str, str] | None:
+        """Display a title+content note form. In read_only mode shows Close/Edit buttons.
+        Returns (title, description) tuple when saved, else None."""
+        result: list[tuple[str, str] | None] = [None]
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(window_title)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.geometry("540x320")
+        dialog.minsize(400, 260)
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(2, weight=1)
+
+        ttk.Label(dialog, text="Title:").grid(row=0, column=0, sticky="w", padx=12, pady=(12, 2))
+        title_var = tk.StringVar(value=title_init)
+        title_entry = ttk.Entry(dialog, textvariable=title_var)
+        title_entry.grid(row=1, column=0, sticky="ew", padx=12)
+
+        ttk.Label(dialog, text="Content:").grid(row=2, column=0, sticky="w", padx=12, pady=(8, 2))
+        content_frame = ttk.Frame(dialog)
+        content_frame.grid(row=3, column=0, sticky="nsew", padx=12)
+        content_frame.columnconfigure(0, weight=1)
+        content_frame.rowconfigure(0, weight=1)
+        dialog.rowconfigure(3, weight=1)
+        desc_text = tk.Text(content_frame, wrap="word", height=8)
+        desc_text.grid(row=0, column=0, sticky="nsew")
+        desc_sb = ttk.Scrollbar(content_frame, orient="vertical", command=desc_text.yview)
+        desc_sb.grid(row=0, column=1, sticky="ns")
+        desc_text.configure(yscrollcommand=desc_sb.set)
+        desc_text.insert("1.0", desc_init)
+
+        if read_only:
+            title_entry.configure(state="disabled")
+            desc_text.configure(state="disabled")
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.grid(row=4, column=0, sticky="ew", padx=12, pady=(8, 12))
+
+        if read_only:
+            def do_edit() -> None:
+                title_entry.configure(state="normal")
+                desc_text.configure(state="normal")
+                edit_btn.pack_forget()
+                close_btn.pack_forget()
+                save_btn.pack(side="right")
+                cancel_btn.pack(side="right", padx=(0, 8))
+                title_entry.focus_set()
+
+            def do_save() -> None:
+                t = title_var.get().strip()
+                d = desc_text.get("1.0", tk.END).strip()
+                if not t:
+                    messagebox.showwarning("Note", "Title cannot be empty.", parent=dialog)
+                    return
+                result[0] = (t, d)
+                dialog.destroy()
+
+            edit_btn = ttk.Button(btn_frame, text="Edit", command=do_edit)
+            edit_btn.pack(side="right")
+            close_btn = ttk.Button(btn_frame, text="Close", command=dialog.destroy)
+            close_btn.pack(side="right", padx=(0, 8))
+            save_btn = ttk.Button(btn_frame, text="Save", command=do_save)
+            cancel_btn = ttk.Button(btn_frame, text="Cancel", command=dialog.destroy)
+        else:
+            def do_save_new() -> None:
+                t = title_var.get().strip()
+                d = desc_text.get("1.0", tk.END).strip()
+                if not t:
+                    messagebox.showwarning("Note", "Title cannot be empty.", parent=dialog)
+                    return
+                result[0] = (t, d)
+                dialog.destroy()
+
+            ttk.Button(btn_frame, text="Save", command=do_save_new).pack(side="right")
+            ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side="right", padx=(0, 8))
+            title_entry.focus_set()
+
+        dialog.wait_window()
+        return result[0]
 
     def add_todo_item(self) -> None:
         if not self.selected_project:
             messagebox.showwarning("Select project", "Please select a project first.")
             return
 
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Add Task")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.geometry("500x200")
-
-        ttk.Label(dialog, text=f"Add task for: {self.selected_project.project_name}").pack(anchor="w", padx=10, pady=(10, 0))
-        task_text = tk.Text(dialog, wrap="word", width=60, height=6)
-        task_text.pack(fill="both", expand=True, padx=10, pady=(6, 10))
-
-        button_frame = ttk.Frame(dialog)
-        button_frame.pack(fill="x", padx=10, pady=(0, 10))
-
-        def save_task() -> None:
-            task = task_text.get("1.0", tk.END).strip()
-            if not task:
-                return
-            todo_row = {
-                "todo_id": self.csv.next_id("todos", "todo_id"),
-                "project_id": self.selected_project.project_id,
-                "description": task,
-                "created_date": datetime.now().isoformat(),
-            }
-            self.csv.append_row("todos", todo_row)
-            self._load_project_todos()
-            self._show_project_todos()
-            dialog.destroy()
-
-        ttk.Button(button_frame, text="Save", command=save_task).pack(side="right")
-        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side="right", padx=(0, 8))
-        dialog.wait_window()
+        res = self._note_popup(window_title=f"Add Note — {self.selected_project.project_name}")
+        if res is None:
+            return
+        title, description = res
+        todo_row = {
+            "todo_id": self.csv.next_id("todos", "todo_id"),
+            "project_id": self.selected_project.project_id,
+            "title": title,
+            "description": description,
+            "created_date": datetime.now().isoformat(),
+        }
+        self.csv.append_row("todos", todo_row)
+        change = ChangeRecord(
+            timestamp=datetime.now().isoformat(),
+            project_id=self.selected_project.project_id,
+            file_id="",
+            change_type="NOTE_ADD",
+            old_value="",
+            new_value=title,
+            note=f"Project note added: {title}",
+        )
+        self.csv.append_row("change_log", change.to_dict())
+        self._load_project_todos()
+        self._show_project_todos()
+        self._show_history()
 
     def remove_todo_item(self) -> None:
         if not self.selected_project:
@@ -1190,18 +1678,96 @@ class DocumentTrackerApp:
         selection = self.todo_listbox.curselection()
         if not selection:
             return
-        index = selection[0]
         todos = self.project_todos.get(self.selected_project.project_id, [])
-        if not (0 <= index < len(todos)):
+        targets = [todos[i] for i in selection if 0 <= i < len(todos)]
+        if not targets:
             return
-        todo_id = todos[index].get("todo_id")
+        count = len(targets)
+        if count > 1:
+            if not messagebox.askyesno(
+                "Remove Notes",
+                f"You have {count} notes selected. Remove all {count} notes permanently?",
+            ):
+                return
         all_todos = self.csv.read_rows("todos")
-        remaining = [row for row in all_todos if not (row.get("project_id") == self.selected_project.project_id and row.get("todo_id") == todo_id)]
+        ids_to_remove = {t.get("todo_id") for t in targets}
+        remaining = [
+            row for row in all_todos
+            if not (row.get("project_id") == self.selected_project.project_id and row.get("todo_id") in ids_to_remove)
+        ]
         self.csv.write_rows("todos", remaining)
+        for t in targets:
+            removed_title = t.get("title", "") or t.get("description", "")[:60]
+            change = ChangeRecord(
+                timestamp=datetime.now().isoformat(),
+                project_id=self.selected_project.project_id,
+                file_id="",
+                change_type="NOTE_REMOVE",
+                old_value=removed_title,
+                new_value="",
+                note=f"Project note removed: {removed_title}",
+            )
+            self.csv.append_row("change_log", change.to_dict())
         self._load_project_todos()
         self._show_project_todos()
+        self._show_history()
+
+    def open_todo_item(self) -> None:
+        """Open selected note(s) in a read-only popup with an Edit button."""
+        if not self.selected_project:
+            return
+        selection = self.todo_listbox.curselection()
+        if not selection:
+            return
+        todos = self.project_todos.get(self.selected_project.project_id, [])
+        targets = [todos[i] for i in selection if 0 <= i < len(todos)]
+        if not targets:
+            return
+        count = len(targets)
+        if count > 1:
+            if not messagebox.askyesno(
+                "Open Notes",
+                f"You have {count} notes selected. Each note will open one at a time. Continue?",
+            ):
+                return
+        any_changed = False
+        for todo in targets:
+            todo_id = todo.get("todo_id")
+            old_title = todo.get("title", "") or todo.get("description", "")[:60]
+            res = self._note_popup(
+                title_init=todo.get("title", ""),
+                desc_init=todo.get("description", ""),
+                read_only=True,
+                window_title=f"Note — {old_title}",
+            )
+            if res is None:
+                continue
+            new_title, new_desc = res
+            all_todos = self.csv.read_rows("todos")
+            for row in all_todos:
+                if row.get("project_id") == self.selected_project.project_id and row.get("todo_id") == todo_id:
+                    row["title"] = new_title
+                    row["description"] = new_desc
+                    break
+            self.csv.write_rows("todos", all_todos)
+            change = ChangeRecord(
+                timestamp=datetime.now().isoformat(),
+                project_id=self.selected_project.project_id,
+                file_id="",
+                change_type="NOTE_EDIT",
+                old_value=old_title,
+                new_value=new_title,
+                note=f"Project note edited: {new_title}",
+            )
+            self.csv.append_row("change_log", change.to_dict())
+            any_changed = True
+        if any_changed:
+            self._load_project_todos()
+            self._show_project_todos()
+            self._show_history()
 
     def edit_todo_item(self) -> None:
+        """Edit selected note directly (opens popup in edit mode)."""
         if not self.selected_project:
             return
         selection = self.todo_listbox.curselection()
@@ -1211,35 +1777,100 @@ class DocumentTrackerApp:
         todos = self.project_todos.get(self.selected_project.project_id, [])
         if not (0 <= index < len(todos)):
             return
-
-        todo_id = todos[index].get("todo_id")
-        current_text = todos[index].get("description", "")
-        new_text = simpledialog.askstring("Edit Note", "Update selected note:", initialvalue=current_text, parent=self.root)
-        if new_text is None:
+        todo = todos[index]
+        todo_id = todo.get("todo_id")
+        old_title = todo.get("title", "") or todo.get("description", "")[:60]
+        res = self._note_popup(
+            title_init=todo.get("title", ""),
+            desc_init=todo.get("description", ""),
+            read_only=False,
+            window_title=f"Edit Note — {old_title}",
+        )
+        if res is None:
             return
-
-        updated_text = new_text.strip()
-        if not updated_text:
-            messagebox.showwarning("Edit Note", "Note text cannot be empty.")
-            return
-
+        new_title, new_desc = res
         all_todos = self.csv.read_rows("todos")
         for row in all_todos:
             if row.get("project_id") == self.selected_project.project_id and row.get("todo_id") == todo_id:
-                row["description"] = updated_text
+                row["title"] = new_title
+                row["description"] = new_desc
                 break
         self.csv.write_rows("todos", all_todos)
+        change = ChangeRecord(
+            timestamp=datetime.now().isoformat(),
+            project_id=self.selected_project.project_id,
+            file_id="",
+            change_type="NOTE_EDIT",
+            old_value=old_title,
+            new_value=new_title,
+            note=f"Project note edited: {new_title}",
+        )
+        self.csv.append_row("change_log", change.to_dict())
         self._load_project_todos()
         self._show_project_todos()
+        self._show_history()
+
+    def _todo_listbox_click(self, event: tk.Event) -> str | None:
+        """Preserve multi-selection when clicking an already-selected item."""
+        self._clear_section_selections("todos")
+        index = self.todo_listbox.nearest(event.y)
+        if 0 <= index < self.todo_listbox.size() and index in self.todo_listbox.curselection():
+            # Item already selected — don't let Tkinter reset the selection.
+            self.todo_listbox.activate(index)
+            return "break"
+        return None
+
+    def _todo_listbox_ctrl_click(self, event: tk.Event) -> str | None:
+        self._clear_section_selections("todos")
+        index = self.todo_listbox.nearest(event.y)
+        if not (0 <= index < self.todo_listbox.size()):
+            return None
+        if self.todo_listbox.selection_includes(index):
+            self.todo_listbox.selection_clear(index)
+        else:
+            self.todo_listbox.selection_set(index)
+            self.todo_listbox.activate(index)
+        self.todo_listbox.focus_set()
+        return "break"
+
+    def _todo_listbox_shift_click(self, event: tk.Event) -> str | None:
+        self._clear_section_selections("todos")
+        index = self.todo_listbox.nearest(event.y)
+        if not (0 <= index < self.todo_listbox.size()):
+            return None
+        # Shift-click on an already selected item toggles it off.
+        if self.todo_listbox.selection_includes(index):
+            self.todo_listbox.selection_clear(index)
+            self.todo_listbox.focus_set()
+            return "break"
+        return None
 
     def show_todo_context_menu(self, event: tk.Event) -> str | None:
         if not self.selected_project:
             return None
         index = self.todo_listbox.nearest(event.y)
-        if index < 0 or index >= self.todo_listbox.size():
-            return None
-        self.todo_listbox.selection_clear(0, tk.END)
-        self.todo_listbox.selection_set(index)
+        is_item_hit = False
+        if 0 <= index < self.todo_listbox.size():
+            row_bbox = self.todo_listbox.bbox(index)
+            if row_bbox:
+                row_top = row_bbox[1]
+                row_height = row_bbox[3]
+                is_item_hit = row_top <= event.y <= (row_top + row_height)
+
+        if not is_item_hit:
+            self.todo_listbox.selection_clear(0, tk.END)
+            self.todo_listbox.focus_set()
+            try:
+                self.todo_empty_context_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                self.todo_empty_context_menu.grab_release()
+            return "break"
+
+        # If the right-clicked item is already part of the selection, keep
+        # the full selection intact so the context menu acts on all of them.
+        if index not in self.todo_listbox.curselection():
+            self.todo_listbox.selection_clear(0, tk.END)
+            self.todo_listbox.selection_set(index)
         self.todo_listbox.activate(index)
         self.todo_listbox.focus_set()
         try:
@@ -1253,12 +1884,12 @@ class DocumentTrackerApp:
             return
 
         editor = tk.Toplevel(self.root)
-        editor.title("Add/Edit Notes")
+        editor.title("Add/Edit File Notes")
         editor.transient(self.root)
         editor.grab_set()
         editor.geometry("600x320")
 
-        ttk.Label(editor, text=f"Notes for: {self.selected_file.relative_path}").pack(anchor="w", padx=10, pady=(10, 0))
+        ttk.Label(editor, text=f"File Notes for: {self.selected_file.relative_path}").pack(anchor="w", padx=10, pady=(10, 0))
         note_text = tk.Text(editor, wrap="word", width=72, height=12)
         note_text.pack(fill="both", expand=True, padx=10, pady=(6, 10))
         note_text.insert("1.0", self.selected_file.notes or "")
@@ -1296,6 +1927,10 @@ class DocumentTrackerApp:
     def show_project_context_menu(self, event: object) -> None:
         project_id = self.project_tree.identify_row(event.y)
         if not project_id:
+            try:
+                self.project_empty_context_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                self.project_empty_context_menu.grab_release()
             return
         self.project_tree.selection_set(project_id)
         self.project_tree.focus(project_id)
@@ -1334,6 +1969,12 @@ class DocumentTrackerApp:
                 label = "Copy Here" if operation == "copy" else "Move Here"
                 self.file_destination_menu.add_command(label=label, command=self.paste_pending_items_here)
                 self.file_destination_menu.add_separator()
+
+        if self._selected_file_tree_items():
+            self.file_destination_menu.add_command(label="Extract Selected Archives Here", command=self.extract_selected_archives_here)
+            self.file_destination_menu.add_command(label="Compress Selected to ZIP...", command=self.compress_selected_items_to_zip)
+            self.file_destination_menu.add_command(label="Compress Folder to ZIP", command=self.compress_selected_folders_to_zip)
+            self.file_destination_menu.add_separator()
 
         self.file_destination_menu.add_command(label="Create New File...", command=self.create_new_file)
         self.file_destination_menu.add_command(label="Create New Folder...", command=self.create_new_folder)
@@ -1497,6 +2138,156 @@ class DocumentTrackerApp:
             if kind in {"file", "folder"}:
                 items.append((kind, relative_path))
         return items
+
+    def _current_project_directory(self) -> Optional[Path]:
+        if not self.selected_project:
+            return None
+        project_root = Path(self.selected_project.root_path)
+        return project_root / Path(self.current_folder_rel) if self.current_folder_rel else project_root
+
+    def _safe_extract_zip(self, archive: zipfile.ZipFile, destination: Path) -> None:
+        destination_resolved = destination.resolve()
+        for member in archive.infolist():
+            member_path = destination / member.filename
+            resolved_member = member_path.resolve()
+            if resolved_member != destination_resolved and destination_resolved not in resolved_member.parents:
+                raise RuntimeError(f"Unsafe archive entry detected: {member.filename}")
+        archive.extractall(destination)
+
+    def extract_selected_archives_here(self) -> None:
+        if not self.selected_project:
+            return
+        destination_dir = self._current_project_directory()
+        if destination_dir is None:
+            return
+
+        archive_exts = {".zip"}
+        project_root = Path(self.selected_project.root_path)
+        selected = self._selected_file_tree_items()
+        archives: List[Path] = []
+        for kind, rel in selected:
+            if kind != "file":
+                continue
+            source = project_root / Path(rel)
+            if source.suffix.lower() in archive_exts and source.exists() and source.is_file():
+                archives.append(source)
+
+        if not archives:
+            messagebox.showwarning("Extract", "Select one or more ZIP files to extract.")
+            return
+
+        try:
+            self._set_busy(True, "Extracting archives...")
+            for archive_path in archives:
+                with zipfile.ZipFile(archive_path, "r") as archive:
+                    self._safe_extract_zip(archive, destination_dir)
+            self.refresh_files()
+            self._show_history()
+            messagebox.showinfo("Extract", f"Extracted {len(archives)} archive(s) to:\n{destination_dir}")
+        except Exception as exc:
+            messagebox.showerror("Extract", f"Could not extract archive(s): {exc}")
+        finally:
+            self._set_busy(False)
+
+    def compress_selected_items_to_zip(self) -> None:
+        if not self.selected_project:
+            return
+
+        selected_items = self._selected_file_tree_items()
+        if not selected_items:
+            messagebox.showwarning("Compress", "Select one or more files or folders to compress.")
+            return
+
+        destination_dir = self._current_project_directory()
+        if destination_dir is None:
+            return
+
+        archive_name = simpledialog.askstring(
+            "Compress Selected",
+            "ZIP file name (without .zip):",
+            parent=self.root,
+        )
+        if archive_name is None:
+            return
+        archive_name = archive_name.strip()
+        if not archive_name:
+            messagebox.showwarning("Compress", "Please provide a ZIP name.")
+            return
+        if archive_name.lower().endswith(".zip"):
+            archive_name = archive_name[:-4]
+        if any(char in archive_name for char in "\\/:*?\"<>|"):
+            messagebox.showwarning("Compress", "ZIP name contains invalid characters.")
+            return
+
+        destination_zip = destination_dir / f"{archive_name}.zip"
+        if destination_zip.exists() and not messagebox.askyesno("Compress", f"{destination_zip.name} already exists. Overwrite?"):
+            return
+
+        project_root = Path(self.selected_project.root_path)
+        try:
+            self._set_busy(True, "Compressing selected items...")
+            with zipfile.ZipFile(destination_zip, "w", zipfile.ZIP_DEFLATED) as archive:
+                for kind, rel in selected_items:
+                    source = project_root / Path(rel)
+                    if not source.exists():
+                        continue
+                    if kind == "file" and source.is_file():
+                        archive.write(source, arcname=source.name)
+                        continue
+                    if kind == "folder" and source.is_dir():
+                        for child in source.rglob("*"):
+                            if child.is_file():
+                                arcname = str(child.relative_to(source.parent)).replace("\\", "/")
+                                archive.write(child, arcname=arcname)
+            self.refresh_files()
+            self._show_history()
+            messagebox.showinfo("Compress", f"Created archive:\n{destination_zip}")
+        except Exception as exc:
+            messagebox.showerror("Compress", f"Could not compress selected items: {exc}")
+        finally:
+            self._set_busy(False)
+
+    def compress_selected_folders_to_zip(self) -> None:
+        if not self.selected_project:
+            return
+
+        selected_items = self._selected_file_tree_items()
+        folder_rels = [rel for kind, rel in selected_items if kind == "folder"]
+        if not folder_rels:
+            messagebox.showwarning("Compress Folder", "Select one or more folders to compress.")
+            return
+
+        project_root = Path(self.selected_project.root_path)
+        created_count = 0
+        try:
+            self._set_busy(True, "Compressing folder(s)...")
+            for rel in folder_rels:
+                folder_path = project_root / Path(rel)
+                if not folder_path.exists() or not folder_path.is_dir():
+                    continue
+                zip_path = folder_path.with_suffix(".zip")
+                if zip_path.exists() and not messagebox.askyesno(
+                    "Compress Folder",
+                    f"{zip_path.name} already exists. Overwrite?",
+                ):
+                    continue
+                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+                    for child in folder_path.rglob("*"):
+                        if child.is_file():
+                            arcname = str(child.relative_to(folder_path.parent)).replace("\\", "/")
+                            archive.write(child, arcname=arcname)
+                created_count += 1
+
+            self.refresh_files()
+            self._show_history()
+            if created_count:
+                messagebox.showinfo("Compress Folder", f"Created {created_count} ZIP archive(s).")
+            else:
+                messagebox.showwarning("Compress Folder", "No folders were compressed.")
+        except Exception as exc:
+            messagebox.showerror("Compress Folder", f"Could not compress folder(s): {exc}")
+        finally:
+            self._set_busy(False)
 
     def _queue_file_operation(self, operation: str) -> None:
         if not self.selected_project:
@@ -2089,7 +2880,11 @@ class DocumentTrackerApp:
             folder_path = project_root / Path(folder_rel)
             if folder_path.exists() and folder_path.is_dir():
                 try:
-                    recycle_path = self._move_to_recycle(folder_path)
+                    recycle_path = self._move_to_recycle(
+                        folder_path,
+                        original_path=folder_path,
+                        project_id=self.selected_project.project_id,
+                    )
                     recycle_moves.append({"recycle": str(recycle_path), "original": str(folder_path)})
                 except Exception as exc:
                     messagebox.showerror("Remove failed", f"Could not remove folder {folder_path}: {exc}")
@@ -2103,7 +2898,11 @@ class DocumentTrackerApp:
                 file_path = project_root / Path(rel_path)
                 if file_path.exists():
                     try:
-                        recycle_path = self._move_to_recycle(file_path)
+                        recycle_path = self._move_to_recycle(
+                            file_path,
+                            original_path=file_path,
+                            project_id=self.selected_project.project_id,
+                        )
                         recycle_moves.append({"recycle": str(recycle_path), "original": str(file_path)})
                     except Exception as exc:
                         messagebox.showerror("Remove failed", f"Could not remove file {file_path}: {exc}")
@@ -2121,6 +2920,18 @@ class DocumentTrackerApp:
             else:
                 updated_rows.append(row)
         self.csv.write_rows("files", updated_rows)
+        inventory_rows = self.csv.read_rows("item_inventory")
+        self.csv.write_rows(
+            "item_inventory",
+            [
+                row
+                for row in inventory_rows
+                if not (
+                    row.get("project_id") == self.selected_project.project_id
+                    and row.get("relative_path", "") in delete_rel_paths
+                )
+            ],
+        )
         self.selected_file = None
         self.selected_item_kind = ""
         self.selected_item_rel = ""
@@ -2194,37 +3005,104 @@ class DocumentTrackerApp:
         if not self.selected_project:
             messagebox.showwarning("Select project", "Please select a project first.")
             return
-        if not messagebox.askyesno("Delete project folder", f"Delete project '{self.selected_project.project_name}' and its folder? This will remove all tracked files and delete the folder on disk."):
+
+        confirm_dialog = tk.Toplevel(self.root)
+        confirm_dialog.title("Delete Project Folder")
+        confirm_dialog.transient(self.root)
+        confirm_dialog.grab_set()
+        confirm_dialog.geometry("460x190")
+        confirm_dialog.resizable(False, False)
+
+        ttk.Label(
+            confirm_dialog,
+            text=(
+                f"This will delete project '{self.selected_project.project_name}', remove all tracked files,\n"
+                "and remove the project folder from disk.\n\n"
+                "Type  DELETE PROJECT FOLDER  to confirm:"
+            ),
+            justify="center",
+        ).pack(pady=(16, 8))
+        confirm_entry = ttk.Entry(confirm_dialog, width=36)
+        confirm_entry.pack()
+        confirm_entry.focus_set()
+
+        button_frame = ttk.Frame(confirm_dialog)
+        button_frame.pack(pady=(12, 0))
+
+        confirmed = {"ok": False}
+
+        def do_confirm() -> None:
+            if confirm_entry.get().strip() != "DELETE PROJECT FOLDER":
+                messagebox.showwarning("Incorrect", "You must type exactly: DELETE PROJECT FOLDER", parent=confirm_dialog)
+                return
+            confirmed["ok"] = True
+            confirm_dialog.destroy()
+
+        ttk.Button(button_frame, text="Delete", command=do_confirm).pack(side="left", padx=(0, 8))
+        ttk.Button(button_frame, text="Cancel", command=confirm_dialog.destroy).pack(side="left")
+        confirm_dialog.wait_window()
+
+        if not confirmed["ok"]:
             return
+
         project_root = Path(self.selected_project.root_path)
         project_id = self.selected_project.project_id
+        try:
+            backup_dir = self._create_auto_backup("delete_project", [project_root])
+        except Exception as exc:
+            messagebox.showerror("Auto Backup", f"Could not create backup before deleting project: {exc}")
+            return
         file_rows = self.csv.read_rows("files")
         project_files = [row for row in file_rows if row.get("project_id") == project_id]
-        for row in project_files:
-            change = ChangeRecord(
-                timestamp=datetime.now().isoformat(),
-                project_id=project_id,
-                file_id=row.get("file_id", ""),
-                change_type="REMOVE",
-                old_value=row.get("relative_path", ""),
-                new_value="",
-                note="Project deleted and tracked file removed.",
-            )
-            self.csv.append_row("change_log", change.to_dict())
-        remaining_files = [row for row in file_rows if row.get("project_id") != project_id]
-        self.csv.write_rows("files", remaining_files)
-        project_rows = self.csv.read_rows("projects")
-        remaining_projects = [row for row in project_rows if row.get("project_id") != project_id]
-        self.csv.write_rows("projects", remaining_projects)
-        if project_root.exists() and project_root.is_dir():
-            try:
-                self._move_to_recycle(project_root)
-            except Exception as exc:
-                messagebox.showwarning("Delete folder", f"Could not delete folder on disk: {exc}")
-        self.selected_project = None
-        self.selected_file = None
-        self.refresh_projects()
-        self.refresh_files()
+        progress_total = max(1, len(project_files) + 3)
+        progress_step = 0
+
+        try:
+            self._set_busy(True, f"Deleting project {self.selected_project.project_name}...")
+            self._set_busy_progress(0, maximum=progress_total, message=f"Deleting project {self.selected_project.project_name}...")
+
+            for row in project_files:
+                change = ChangeRecord(
+                    timestamp=datetime.now().isoformat(),
+                    project_id=project_id,
+                    file_id=row.get("file_id", ""),
+                    change_type="REMOVE",
+                    old_value=row.get("relative_path", ""),
+                    new_value="",
+                    note="Project deleted and tracked file removed.",
+                )
+                self.csv.append_row("change_log", change.to_dict())
+                progress_step += 1
+                self._set_busy_progress(progress_step, message=f"Removing {Path(row.get('relative_path', '')).name or self.selected_project.project_name}...")
+
+            remaining_files = [row for row in file_rows if row.get("project_id") != project_id]
+            self.csv.write_rows("files", remaining_files)
+            progress_step += 1
+            self._set_busy_progress(progress_step, message="Updating tracked files...")
+
+            inventory_rows = self.csv.read_rows("item_inventory")
+            self.csv.write_rows("item_inventory", [row for row in inventory_rows if row.get("project_id") != project_id])
+            project_rows = self.csv.read_rows("projects")
+            remaining_projects = [row for row in project_rows if row.get("project_id") != project_id]
+            self.csv.write_rows("projects", remaining_projects)
+            progress_step += 1
+            self._set_busy_progress(progress_step, message="Updating project list...")
+
+            if project_root.exists() and project_root.is_dir():
+                try:
+                    self._move_to_recycle(project_root, original_path=project_root, project_id=project_id)
+                except Exception as exc:
+                    messagebox.showwarning("Delete folder", f"Could not delete folder on disk: {exc}")
+            progress_step += 1
+            self._set_busy_progress(progress_step, message="Refreshing views...")
+
+            self.selected_project = None
+            self.selected_file = None
+            self.refresh_projects()
+            self.refresh_files()
+        finally:
+            self._set_busy(False)
+        messagebox.showinfo("Delete complete", f"Project deleted. Auto backup saved to:\n{backup_dir}")
 
     def _auto_sync_repository(self) -> None:
         """On startup: remove projects whose folder is gone and register any new
@@ -2249,11 +3127,15 @@ class DocumentTrackerApp:
             self.csv.write_rows("files", [r for r in file_rows if r.get("project_id") not in removed_ids])
             todo_rows = self.csv.read_rows("todos")
             self.csv.write_rows("todos", [r for r in todo_rows if r.get("project_id") not in removed_ids])
+            inventory_rows = self.csv.read_rows("item_inventory")
+            self.csv.write_rows("item_inventory", [r for r in inventory_rows if r.get("project_id") not in removed_ids])
 
         # Register new subfolders in the repository that are not yet tracked
         tracked_paths = {Path(row.get("root_path", "")).resolve() for row in valid_rows}
         for subfolder in sorted(repo.iterdir()):
             if not subfolder.is_dir():
+                continue
+            if subfolder.name == SHARED_REPO_SETTINGS_DIR:
                 continue
             if subfolder.resolve() in tracked_paths:
                 continue
@@ -2272,130 +3154,411 @@ class DocumentTrackerApp:
 
     def refresh_repository(self) -> None:
         """Refresh all repository projects and tracked file metadata globally."""
-        selected_project_id = self.selected_project.project_id if self.selected_project else None
+        try:
+            selected_project_id = self.selected_project.project_id if self.selected_project else None
 
-        self._auto_sync_repository()
-        project_rows = self.csv.read_rows("projects")
-        all_file_rows = self.csv.read_rows("files")
-        updated_all_rows: List[dict] = []
+            self._auto_sync_repository()
+            project_rows = self.csv.read_rows("projects")
+            all_file_rows = self.csv.read_rows("files")
+            updated_all_rows: List[dict] = []
+            active_projects = [
+                row for row in project_rows
+                if Path(row.get("root_path", "")).exists() and Path(row.get("root_path", "")).is_dir()
+            ]
 
-        max_file_id = 0
-        for row in all_file_rows:
-            try:
-                max_file_id = max(max_file_id, int(row.get("file_id", "0")))
-            except ValueError:
-                continue
+            self._set_busy(True, "Refreshing repository...")
+            self._set_busy_progress(0, maximum=max(1, len(active_projects)), message="Refreshing repository...")
 
-        for project_row in project_rows:
-            project_id = project_row.get("project_id", "")
-            root_folder = Path(project_row.get("root_path", ""))
-            if not root_folder.exists() or not root_folder.is_dir():
-                continue
-
-            scanned = list(scan_project_files(root_folder))
-            tracked_rows = [row for row in all_file_rows if row.get("project_id") == project_id]
-            tracked = [TrackedFile.from_dict(row) for row in tracked_rows]
-            changes = detect_changes(project_id, tracked, scanned)
-            for record in changes:
-                self.csv.append_row("change_log", record.to_dict())
-                if record.change_type in {"ADD", "MODIFY", "MOVE", "META_UPDATE"}:
-                    target_rel = record.new_value or record.old_value
-                    if target_rel:
-                        target_path = root_folder / Path(target_rel)
-                        if target_path.exists() and target_path.is_file():
-                            self._save_snapshot_for_file(project_id, target_path, target_rel)
-
-            scan_by_rel = {row["relative_path"]: row for row in scanned}
-            scan_by_checksum = {row["checksum"]: row for row in scanned}
-            project_updated_rows: List[dict] = []
-
-            for row in tracked_rows:
-                relative = row.get("relative_path", "")
-                checksum = row.get("checksum", "")
-                current = scan_by_rel.get(relative) or scan_by_checksum.get(checksum)
-                if not current:
+            max_file_id = 0
+            for row in all_file_rows:
+                try:
+                    max_file_id = max(max_file_id, int(row.get("file_id", "0")))
+                except ValueError:
                     continue
-                row["relative_path"] = current["relative_path"]
-                row["extension"] = current["extension"]
-                row["file_size"] = current["file_size"]
-                row["last_modified"] = current["last_modified"]
-                row["checksum"] = current["checksum"]
-                project_updated_rows.append(row)
 
-            existing_paths = {row.get("relative_path", "") for row in project_updated_rows}
-            for row in scanned:
-                rel_path = row["relative_path"]
-                if rel_path in existing_paths:
-                    continue
-                max_file_id += 1
-                project_updated_rows.append({
-                    "file_id": str(max_file_id),
+            for index, project_row in enumerate(active_projects, start=1):
+                project_id = project_row.get("project_id", "")
+                root_folder = Path(project_row.get("root_path", ""))
+                project_name = project_row.get("project_name", "") or root_folder.name
+                self._set_busy_progress(index - 1, message=f"Refreshing {project_name}...")
+
+                scanned = list(scan_project_files(root_folder))
+                self._update_item_inventory_for_project(project_id, scanned)
+                tracked_rows = [row for row in all_file_rows if row.get("project_id") == project_id]
+                tracked = [TrackedFile.from_dict(row) for row in tracked_rows]
+                changes = detect_changes(project_id, tracked, scanned)
+                for record in changes:
+                    self.csv.append_row("change_log", record.to_dict())
+                    if record.change_type in {"ADD", "MODIFY", "MOVE", "META_UPDATE"}:
+                        target_rel = record.new_value or record.old_value
+                        if target_rel:
+                            target_path = root_folder / Path(target_rel)
+                            if target_path.exists() and target_path.is_file():
+                                self._save_snapshot_for_file(project_id, target_path, target_rel)
+
+                scan_by_rel = {row["relative_path"]: row for row in scanned}
+                scan_by_checksum = {row["checksum"]: row for row in scanned}
+                project_updated_rows: List[dict] = []
+
+                for row in tracked_rows:
+                    relative = row.get("relative_path", "")
+                    checksum = row.get("checksum", "")
+                    current = scan_by_rel.get(relative) or scan_by_checksum.get(checksum)
+                    if not current:
+                        continue
+                    row["relative_path"] = current["relative_path"]
+                    row["extension"] = current["extension"]
+                    row["file_size"] = current["file_size"]
+                    row["last_modified"] = current["last_modified"]
+                    row["checksum"] = current["checksum"]
+                    project_updated_rows.append(row)
+
+                existing_paths = {row.get("relative_path", "") for row in project_updated_rows}
+                for row in scanned:
+                    rel_path = row["relative_path"]
+                    if rel_path in existing_paths:
+                        continue
+                    max_file_id += 1
+                    project_updated_rows.append({
+                        "file_id": str(max_file_id),
+                        "project_id": project_id,
+                        "relative_path": rel_path,
+                        "extension": row["extension"],
+                        "file_size": row["file_size"],
+                        "last_modified": row["last_modified"],
+                        "checksum": row["checksum"],
+                        "notes": "",
+                    })
+
+                project_row["last_scanned_date"] = datetime.now().isoformat()
+                updated_all_rows.extend(project_updated_rows)
+                self._set_busy_progress(index, message=f"Refreshing {project_name}...")
+
+            self.csv.write_rows("files", updated_all_rows)
+            self.csv.write_rows("projects", project_rows)
+
+            self.refresh_projects()
+            if selected_project_id and any(row.get("project_id") == selected_project_id for row in project_rows):
+                self.project_tree.selection_set(selected_project_id)
+                self.on_project_select(None)
+            else:
+                self.selected_project = None
+                self.current_folder_rel = ""
+                self.refresh_files()
+            self._update_dashboard()
+        finally:
+            self._set_busy(False)
+
+    def _update_item_inventory_for_project(self, project_id: str, scanned_rows: List[dict[str, str]]) -> None:
+        now = datetime.now().isoformat()
+        all_inventory = self.csv.read_rows("item_inventory")
+        project_inventory = [row for row in all_inventory if row.get("project_id") == project_id]
+        other_inventory = [row for row in all_inventory if row.get("project_id") != project_id]
+
+        current_by_rel = {row["relative_path"]: row for row in scanned_rows}
+        current_checksums = {row["checksum"] for row in scanned_rows}
+
+        # Detect manual removals based on prior inventory snapshots.
+        for row in project_inventory:
+            prev_rel = row.get("relative_path", "")
+            prev_checksum = row.get("checksum", "")
+            if prev_rel not in current_by_rel and prev_checksum not in current_checksums:
+                self.csv.append_row(
+                    "change_log",
+                    ChangeRecord(
+                        timestamp=now,
+                        project_id=project_id,
+                        file_id=prev_checksum,
+                        change_type="MANUAL_REMOVE",
+                        old_value=prev_rel,
+                        new_value="",
+                        note=f"Manual removal detected: {prev_rel} ({prev_checksum})",
+                    ).to_dict(),
+                )
+
+        rebuilt_project_inventory: List[dict[str, str]] = []
+        for row in scanned_rows:
+            rebuilt_project_inventory.append(
+                {
                     "project_id": project_id,
-                    "relative_path": rel_path,
+                    "item_id": row["checksum"],
+                    "relative_path": row["relative_path"],
                     "extension": row["extension"],
-                    "file_size": row["file_size"],
-                    "last_modified": row["last_modified"],
                     "checksum": row["checksum"],
-                    "notes": "",
-                })
+                    "last_seen": now,
+                }
+            )
 
-            project_row["last_scanned_date"] = datetime.now().isoformat()
-            updated_all_rows.extend(project_updated_rows)
+        self.csv.write_rows("item_inventory", other_inventory + rebuilt_project_inventory)
 
-        self.csv.write_rows("files", updated_all_rows)
-        self.csv.write_rows("projects", project_rows)
+    def _create_auto_backup(self, reason: str, project_roots: Optional[List[Path]] = None) -> Path:
+        if not self.backup_folder:
+            raise RuntimeError("Backup folder is not configured.")
 
-        self.refresh_projects()
-        if selected_project_id and any(row.get("project_id") == selected_project_id for row in project_rows):
-            self.project_tree.selection_set(selected_project_id)
-            self.on_project_select(None)
-        else:
-            self.selected_project = None
-            self.current_folder_rel = ""
-            self.refresh_files()
-        self._update_dashboard()
+        backup_root = self.backup_folder.resolve() / SHARED_REPO_SETTINGS_DIR / BACKUPS_SUBDIR
+        backup_root.mkdir(parents=True, exist_ok=True)
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        destination = backup_root / f"auto_backup_{stamp}_{reason}"
+        counter = 1
+        while destination.exists():
+            destination = backup_root / f"auto_backup_{stamp}_{reason}_{counter}"
+            counter += 1
+        destination.mkdir(parents=True, exist_ok=True)
+
+        # Build copy task list first so progress can be deterministic.
+        copy_tasks: List[tuple[Path, Path]] = []
+        data_dest = destination / "Data"
+        data_dest.mkdir(parents=True, exist_ok=True)
+        for name in ("projects.csv", "files.csv", "change_log.csv", "todos.csv", "item_inventory.csv"):
+            src = self.csv.base_dir / name
+            if src.exists() and src.is_file():
+                copy_tasks.append((src, data_dest / name))
+
+        projects_dest = destination / "Projects"
+        projects_dest.mkdir(parents=True, exist_ok=True)
+        roots = project_roots if project_roots is not None else [Path(row.get("root_path", "")) for row in self.csv.read_rows("projects")]
+        for root in roots:
+            try:
+                resolved = root.resolve()
+            except Exception:
+                continue
+            if not resolved.exists() or not resolved.is_dir():
+                continue
+            project_target_root = projects_dest / resolved.name
+            project_target_root.mkdir(parents=True, exist_ok=True)
+            for child in resolved.rglob("*"):
+                relative = child.relative_to(resolved)
+                target = project_target_root / relative
+                if child.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                elif child.is_file():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    copy_tasks.append((child, target))
+
+        progress_dialog = tk.Toplevel(self.root)
+        progress_dialog.title("Auto Backup In Progress")
+        progress_dialog.transient(self.root)
+        progress_dialog.grab_set()
+        progress_dialog.geometry("520x150")
+        progress_dialog.resizable(False, False)
+
+        status_var = tk.StringVar(value="Preparing backup...")
+        ttk.Label(progress_dialog, textvariable=status_var, wraplength=480, justify="left").pack(anchor="w", padx=12, pady=(12, 6))
+        progress = ttk.Progressbar(progress_dialog, mode="determinate", maximum=max(1, len(copy_tasks)))
+        progress.pack(fill="x", padx=12, pady=(0, 8))
+        count_var = tk.StringVar(value=f"0 / {len(copy_tasks)} files")
+        ttk.Label(progress_dialog, textvariable=count_var).pack(anchor="w", padx=12)
+
+        cancelled = {"value": False}
+
+        def cancel_backup() -> None:
+            cancelled["value"] = True
+
+        progress_dialog.protocol("WM_DELETE_WINDOW", cancel_backup)
+        ttk.Button(progress_dialog, text="Cancel", command=cancel_backup).pack(anchor="e", padx=12, pady=(8, 8))
+
+        try:
+            for index, (src, dst) in enumerate(copy_tasks, start=1):
+                if cancelled["value"]:
+                    raise RuntimeError("Backup operation was cancelled by user.")
+
+                status_var.set(f"Copying: {src.name}")
+                shutil.copy2(src, dst)
+
+                # Integrity verification: always compare size; checksum for smaller files.
+                src_stat = src.stat()
+                dst_stat = dst.stat()
+                if src_stat.st_size != dst_stat.st_size:
+                    raise RuntimeError(f"Copied file size mismatch for '{src}'.")
+                if src_stat.st_size <= 50 * 1024 * 1024:
+                    if compute_checksum(src) != compute_checksum(dst):
+                        raise RuntimeError(f"Checksum verification failed for '{src}'.")
+
+                progress["value"] = index
+                count_var.set(f"{index} / {len(copy_tasks)} files")
+                progress_dialog.update_idletasks()
+                self.root.update()
+        except Exception:
+            try:
+                if destination.exists():
+                    shutil.rmtree(destination)
+            finally:
+                progress_dialog.destroy()
+            raise
+
+        progress_dialog.destroy()
+        return destination
 
     def export_backup(self) -> None:
+        session_root = self._session_archive_root()
+        initial_file = f"session_capture_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
         destination = filedialog.asksaveasfilename(
-            title="Export Backup",
+            title="Capture Session (ZIP)",
+            initialdir=str(session_root) if session_root else str(self.app_base_dir),
+            initialfile=initial_file,
             defaultextension=".zip",
             filetypes=[("ZIP files", "*.zip")],
         )
         if not destination:
             return
         try:
+            self._set_busy(True, "Capturing session archive...")
             with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as archive:
-                for name in ("projects.csv", "files.csv", "change_log.csv", "todos.csv"):
+                for name in ("projects.csv", "files.csv", "change_log.csv", "todos.csv", "item_inventory.csv"):
                     path = self.csv.base_dir / name
                     if path.exists():
                         archive.write(path, arcname=name)
                 for folder_name in ("repository", "snapshots", "recycle_bin"):
-                    folder = Path(__file__).resolve().parent / folder_name
+                    folder = self.app_base_dir / folder_name
                     if folder.exists():
                         for child in folder.rglob("*"):
                             if child.is_file():
-                                archive.write(child, arcname=str(child.relative_to(Path(__file__).resolve().parent)).replace("\\", "/"))
-            messagebox.showinfo("Backup", "Backup exported successfully.")
+                                archive.write(child, arcname=str(child.relative_to(self.app_base_dir)).replace("\\", "/"))
+            messagebox.showinfo("Capture Session", "Session archive captured successfully.")
         except Exception as exc:
-            messagebox.showerror("Backup", f"Backup export failed: {exc}")
+            messagebox.showerror("Capture Session", f"Session capture failed: {exc}")
+        finally:
+            self._set_busy(False)
 
     def import_backup(self) -> None:
-        source = filedialog.askopenfilename(title="Import Backup", filetypes=[("ZIP files", "*.zip")])
+        session_root = self._session_archive_root()
+        source = filedialog.askopenfilename(
+            title="Restore Session (ZIP)",
+            initialdir=str(session_root) if session_root else str(self.app_base_dir),
+            filetypes=[("ZIP files", "*.zip")],
+        )
         if not source:
             return
-        if not messagebox.askyesno("Import Backup", "Importing will overwrite current local data. Continue?"):
+        if not messagebox.askyesno("Restore Session", "Restoring a session archive will overwrite current local data. Continue?"):
             return
-        base = Path(__file__).resolve().parent
+        base = self.app_base_dir
         try:
+            self._set_busy(True, "Restoring session archive...")
             with zipfile.ZipFile(source, "r") as archive:
                 archive.extractall(base)
             self._auto_sync_repository()
             self.refresh_projects()
             self.refresh_files()
             self._show_history()
-            messagebox.showinfo("Import", "Backup imported successfully.")
+            messagebox.showinfo("Restore Session", "Session archive restored successfully.")
         except Exception as exc:
-            messagebox.showerror("Import", f"Backup import failed: {exc}")
+            messagebox.showerror("Restore Session", f"Session restore failed: {exc}")
+        finally:
+            self._set_busy(False)
+
+    def restore_project_from_backup(self) -> None:
+        if not self.backup_folder:
+            messagebox.showwarning("Restore Project", "Backup folder is not configured in Settings.")
+            return
+
+        backup_root = self.backup_folder.resolve() / SHARED_REPO_SETTINGS_DIR / BACKUPS_SUBDIR
+        if not backup_root.exists() or not backup_root.is_dir():
+            messagebox.showinfo(
+                "Restore Project",
+                "No auto-backup snapshots found.\n\n"
+                "Auto-backups are created automatically when:\n"
+                "  • You delete a project\n"
+                "  • You reset all data\n\n"
+                f"Backup folder path:\n{backup_root}"
+            )
+            return
+
+        selected_path = filedialog.askdirectory(
+            title="Select a backup snapshot folder (auto_backup_*)",
+            initialdir=str(backup_root),
+        )
+        if not selected_path:
+            return
+
+        backup_folder_path = Path(selected_path).resolve()
+
+        # Verify it's inside the backup root
+        try:
+            backup_folder_path.relative_to(backup_root)
+        except ValueError:
+            messagebox.showerror("Restore", "Selected folder must be inside the Backups directory.")
+            return
+
+        # Check for Projects subfolder
+        projects_dir = backup_folder_path / "Projects"
+        if not projects_dir.exists():
+            messagebox.showwarning("Restore", f"Selected backup folder has no Projects subfolder:\n{backup_folder_path}")
+            return
+
+        projects = [p.name for p in projects_dir.iterdir() if p.is_dir()]
+        if not projects:
+            messagebox.showinfo("Restore", "No projects found in this backup.")
+            return
+
+        # Show project selection dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Select Project to Restore")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.geometry("400x300")
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(1, weight=1)
+
+        ttk.Label(dialog, text=f"Projects in backup:\n{backup_folder_path.name}", font=("TkDefaultFont", 9)).pack(anchor="w", padx=12, pady=(12, 8))
+
+        listbox = tk.Listbox(dialog, height=10)
+        listbox.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        for project in sorted(projects):
+            listbox.insert("end", project)
+
+        selected_project = {}
+
+        def do_restore() -> None:
+            selection = listbox.curselection()
+            if not selection:
+                messagebox.showwarning("Restore", "Please select a project.", parent=dialog)
+                return
+            selected_project["name"] = listbox.get(selection[0])
+            dialog.destroy()
+
+        btn_row = ttk.Frame(dialog)
+        btn_row.pack(side="bottom", fill="x", padx=12, pady=(0, 12))
+
+        ttk.Button(btn_row, text="Restore", command=do_restore).pack(side="right")
+        ttk.Button(btn_row, text="Cancel", command=dialog.destroy).pack(side="right", padx=(0, 8))
+
+        dialog.wait_window()
+
+        if not selected_project:
+            return
+
+        project_name = selected_project["name"]
+        source_project = projects_dir / project_name
+        target_project = self.repository_folder / project_name
+
+        if target_project.exists():
+            overwrite = messagebox.askyesno(
+                "Restore Project",
+                f"Project '{project_name}' already exists in repository. Overwrite it?",
+            )
+            if not overwrite:
+                return
+
+        try:
+            self._set_busy(True, f"Restoring {project_name}...")
+            if target_project.exists() and target_project.is_dir():
+                shutil.rmtree(target_project)
+            shutil.copytree(source_project, target_project)
+            self.refresh_repository()
+
+            # Select restored project if it exists in current project list.
+            restored = next((p for p in self.projects if p.project_name == project_name), None)
+            if restored:
+                self.project_tree.selection_set(restored.project_id)
+                self.on_project_select(None)
+        except Exception as exc:
+            messagebox.showerror("Restore Project", f"Could not restore project from backup: {exc}")
+            return
+        finally:
+            self._set_busy(False)
+
+        messagebox.showinfo("Restore Project", f"Project '{project_name}' restored successfully from backup.")
 
     def _bind_shortcuts(self) -> None:
         self.root.bind("<Control-f>", lambda event: self._focus_file_search())
@@ -2406,6 +3569,8 @@ class DocumentTrackerApp:
         self.root.bind("<Control-z>", self._shortcut_undo)
         self.root.bind("<BackSpace>", self._shortcut_back)
         self.root.bind("<Delete>", self._shortcut_delete)
+        self.root.bind("<Escape>", self._shortcut_clear_selection)
+        self.root.bind("<Control-a>", self._shortcut_select_all)
         self.root.bind("<F5>", lambda event: self.refresh_repository())
 
     def _focused_widget_is_text_input(self) -> bool:
@@ -2450,6 +3615,39 @@ class DocumentTrackerApp:
             return "break"
         self.remove_item()
         return "break"
+
+    def _shortcut_select_all(self, event: tk.Event) -> str | None:
+        if self._focused_widget_is_text_input():
+            return None
+        focused = self.root.focus_get()
+        if focused == self.todo_listbox:
+            self.todo_listbox.selection_set(0, tk.END)
+            return "break"
+        if focused == self.file_tree:
+            all_ids = self.file_tree.get_children()
+            if all_ids:
+                self.file_tree.selection_set(all_ids)
+            return "break"
+        return None
+
+    def _shortcut_clear_selection(self, event: tk.Event) -> str | None:
+        if self._focused_widget_is_text_input():
+            return None
+        focused = self.root.focus_get()
+        if focused == self.project_tree:
+            self.project_tree.selection_remove(self.project_tree.selection())
+            self.on_project_select(None)
+            self.refresh_files()
+            self._show_history()
+            return "break"
+        if focused == self.file_tree:
+            self.file_tree.selection_remove(self.file_tree.selection())
+            self.on_file_select(None)
+            return "break"
+        if focused == self.todo_listbox:
+            self.todo_listbox.selection_clear(0, tk.END)
+            return "break"
+        return None
 
     def _focus_file_search(self) -> None:
         self.search_entry.focus_set()
@@ -2585,12 +3783,199 @@ class DocumentTrackerApp:
         width = max(min_width, (max_chars * 8) + 24)
         tree.column(column_key, width=width, stretch=False)
 
-    def _move_to_recycle(self, path: Path) -> Path:
+    def _move_to_recycle(self, path: Path, original_path: Optional[Path] = None, project_id: str = "") -> Path:
         self.recycle_bin_folder.mkdir(parents=True, exist_ok=True)
+        source = path.resolve()
+        original = (original_path or path).resolve()
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        destination = self.recycle_bin_folder / f"{stamp}_{path.name}"
-        shutil.move(str(path), str(destination))
+        is_directory = source.is_dir()
+
+        rel_parent = Path("misc")
+        project_folder_name = "misc"
+        relative_path = original.name
+        if project_id:
+            project = self.selected_project if self.selected_project and self.selected_project.project_id == project_id else self._find_project_by_id(project_id)
+            if project is not None:
+                project_root = Path(project.root_path).resolve()
+                project_folder_name = project_root.name
+                try:
+                    relative = original.relative_to(project_root)
+                    relative_path = "" if str(relative) == "." else str(relative).replace("\\", "/")
+                    rel_parent = Path(project_folder_name) / (relative.parent if str(relative) != "." else Path())
+                except Exception:
+                    rel_parent = Path(project_folder_name)
+                    relative_path = original.name
+            else:
+                project_folder_name = project_id
+                rel_parent = Path(project_folder_name)
+
+        recycle_dir = self.recycle_bin_folder / rel_parent
+        recycle_dir.mkdir(parents=True, exist_ok=True)
+        destination = recycle_dir / f"{stamp}_{original.name}"
+        shutil.move(str(source), str(destination))
+
+        manifest = self._load_recycle_manifest()
+        manifest.append(
+            {
+                "recycle_path": str(destination),
+                "original_path": str(original),
+                "project_id": project_id,
+                "project_folder_name": project_folder_name,
+                "relative_path": relative_path,
+                "item_type": "folder" if is_directory else "file",
+                "deleted_at": datetime.now().isoformat(),
+            }
+        )
+        self._save_recycle_manifest(manifest)
         return destination
+
+    def restore_recycle_item(self) -> None:
+        if not self.selected_project:
+            messagebox.showwarning(
+                "Recycle Bin",
+                "Select a project first. Restore from recycle bin is limited to the active project to prevent file mixing.",
+            )
+            return
+
+        project_root = Path(self.selected_project.root_path).resolve()
+        project_folder_name = project_root.name
+        manifest = self._load_recycle_manifest()
+        valid_entries = []
+        for row in manifest:
+            recycle_path = Path(str(row.get("recycle_path", "")))
+            if not recycle_path.exists():
+                continue
+
+            row_project_id = str(row.get("project_id", ""))
+            row_project_folder = str(row.get("project_folder_name", "")).strip()
+            original_path_text = str(row.get("original_path", "")).strip()
+
+            belongs_to_project = row_project_id == self.selected_project.project_id
+            if not belongs_to_project and original_path_text:
+                try:
+                    Path(original_path_text).resolve().relative_to(project_root)
+                    belongs_to_project = True
+                except Exception:
+                    belongs_to_project = False
+            if not belongs_to_project and row_project_folder:
+                belongs_to_project = row_project_folder == project_folder_name
+
+            if belongs_to_project:
+                valid_entries.append(row)
+
+        if not valid_entries:
+            messagebox.showinfo(
+                "Recycle Bin",
+                f"No recyclable items are available for project '{self.selected_project.project_name}'.",
+            )
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Restore Recycle Bin Item - {self.selected_project.project_name}")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.geometry("920x420")
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(0, weight=1)
+
+        tree = ttk.Treeview(dialog, columns=("type", "deleted", "path"), show="headings", selectmode="extended")
+        tree.heading("type", text="Type")
+        tree.heading("deleted", text="Deleted Time")
+        tree.heading("path", text="Project Path")
+        tree.column("type", width=100, anchor="w")
+        tree.column("deleted", width=180, anchor="w")
+        tree.column("path", width=600, anchor="w")
+        tree.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+
+        scroll = ttk.Scrollbar(dialog, orient="vertical", command=tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns", pady=10)
+        tree.configure(yscrollcommand=scroll.set)
+
+        ttk.Label(
+            dialog,
+            text=f"Showing recycle bin items only for project folder: {project_root}",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 8))
+
+        index_map: dict[str, dict[str, str]] = {}
+        for idx, row in enumerate(valid_entries):
+            iid = f"rec::{idx}"
+            deleted_display = self._format_datetime_readable(row.get("deleted_at", ""))
+            relative_path = str(row.get("relative_path", "")).strip()
+            if not relative_path:
+                original_path_text = str(row.get("original_path", "")).strip()
+                if original_path_text:
+                    try:
+                        relative_path = str(Path(original_path_text).resolve().relative_to(project_root)).replace("\\", "/")
+                    except Exception:
+                        relative_path = Path(original_path_text).name
+            display_path = relative_path or Path(str(row.get("original_path", ""))).name
+            item_type = str(row.get("item_type", "")).strip() or ("folder" if Path(str(row.get("recycle_path", ""))).is_dir() else "file")
+            tree.insert("", "end", iid=iid, values=(item_type.title(), deleted_display, display_path))
+            index_map[iid] = row
+
+        btn_row = ttk.Frame(dialog)
+        btn_row.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
+
+        def do_restore() -> None:
+            selected = tree.selection()
+            if not selected:
+                return
+
+            restored_paths: set[str] = set()
+            restored_count = 0
+            for iid in selected:
+                row = index_map.get(iid)
+                if not row:
+                    continue
+                recycle_path = Path(str(row.get("recycle_path", "")))
+                if not recycle_path.exists():
+                    continue
+
+                relative_path = str(row.get("relative_path", "")).strip()
+                if relative_path:
+                    original_path = project_root / Path(relative_path)
+                else:
+                    original_path_text = str(row.get("original_path", "")).strip()
+                    if not original_path_text:
+                        continue
+                    try:
+                        original_path = project_root / Path(Path(original_path_text).resolve().relative_to(project_root))
+                    except Exception:
+                        messagebox.showwarning(
+                            "Restore",
+                            f"Skipped an item that does not belong to the active project:\n{original_path_text}",
+                            parent=dialog,
+                        )
+                        continue
+
+                try:
+                    original_path.resolve().relative_to(project_root)
+                except Exception:
+                    messagebox.showwarning(
+                        "Restore",
+                        f"Skipped an item outside the active project:\n{original_path}",
+                        parent=dialog,
+                    )
+                    continue
+
+                if original_path.exists():
+                    messagebox.showwarning("Restore", f"Skip existing path:\n{original_path}", parent=dialog)
+                    continue
+                original_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(recycle_path), str(original_path))
+                restored_paths.add(str(recycle_path))
+                restored_count += 1
+
+            if restored_paths:
+                self._save_recycle_manifest([row for row in manifest if str(row.get("recycle_path", "")) not in restored_paths])
+
+            dialog.destroy()
+            if restored_count:
+                messagebox.showinfo("Restore", f"Restored {restored_count} item(s) from recycle bin.")
+
+        ttk.Button(btn_row, text="Restore Selected", command=do_restore).pack(side="right")
+        ttk.Button(btn_row, text="Cancel", command=dialog.destroy).pack(side="right", padx=(0, 8))
+        dialog.wait_window()
 
     def _snapshot_path_for_relative(self, project_id: str, relative_path: str) -> Path:
         safe_rel = Path(relative_path)
@@ -2618,9 +4003,10 @@ class DocumentTrackerApp:
 
     def _update_dashboard(self) -> None:
         self._apply_dashboard_compact_layout()
-        projects = self.csv.read_rows("projects")
-        files = self.csv.read_rows("files")
-        changes = self.csv.read_rows("change_log")
+        projects = [row for row in self.csv.read_rows("projects") if not self._is_internal_project_row(row)]
+        visible_project_ids = {row.get("project_id", "") for row in projects}
+        files = [row for row in self.csv.read_rows("files") if row.get("project_id", "") in visible_project_ids]
+        changes = [row for row in self.csv.read_rows("change_log") if row.get("project_id", "") in visible_project_ids]
         now = datetime.now()
         today_str = now.strftime("%Y-%m-%d")
         today_count = sum(1 for row in changes if row.get("timestamp", "").startswith(today_str))

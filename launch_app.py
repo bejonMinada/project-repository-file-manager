@@ -61,7 +61,7 @@ def main() -> None:
     python_exe = create_virtualenv()
     if Path(sys.executable).resolve() != python_exe.resolve():
         install_requirements(python_exe)
-        print("Launching Project File Manager...")
+        print("Launching Project Repository File Manager...")
         raise SystemExit(run_application(python_exe))
 
     # Running inside the virtual environment already.
