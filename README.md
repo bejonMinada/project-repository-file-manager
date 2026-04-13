@@ -132,7 +132,7 @@ Local desktop file and project tracker with change detection, revision managemen
 ## Version History
 
 - **3.2** – Multi-select + Restore All in recycle bin and auto-backup restore dialogs; F2 rename for files and folders; Ctrl+A in recycle bin dialog; full horizontal and vertical scrollbars on all text boxes; restore history logging.
-- **3.1** – Fixed folder ZIP naming (preserves dots in folder names), enhanced reset to force-delete locked folders, cleanup.
+- **3.1** – Fixed folder ZIP naming (preserves dots in folder names), removed terminal integration, enhanced reset to force-delete locked folders, cleanup.
 - **3.0** – Performance optimization, terminal integration, long-path support on Windows.
 - **2.x** – Initial stable release.
 
