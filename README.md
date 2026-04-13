@@ -1,4 +1,4 @@
-# Project Repository File Manager 3.1
+# Project Repository File Manager 3.2
 
 **Project Repository File Manager** is a local desktop application for organizing project folders, tracking file changes, comparing revisions, restoring snapshots, and managing project notes in a responsive Tkinter workspace.
 
@@ -16,7 +16,7 @@ Local desktop file and project tracker with change detection, revision managemen
 - Built-in file browser with folder navigation (double-click to enter, **Backspace** to go back one level).
 - Breadcrumb path display showing current folder depth.
 - File-type icons with special icon for compressed archives.
-- Per-file and folder operations: open, rename, remove.
+- Per-file and folder operations: open, rename (**F2**), remove.
 
 ### Change Detection & Versioning
 - Checksum-based change detection (SHA-256) with change types: `ADD`, `REMOVE`, `MODIFY`, `MOVE`, `META_UPDATE`.
@@ -29,7 +29,7 @@ Local desktop file and project tracker with change detection, revision managemen
 - Global **Refresh** scans entire repository and updates all project/file metadata.
 - Checksum cache reuse for unchanged files (faster scans on large repositories).
 - Auto-generated backup folders: `Backups/` (timestamped) and `Session/` (for session archives).
-- Restore entire project from timestamped backup folder.
+- Restore one or multiple projects from timestamped backup folder (multi-select + Restore All).
 
 ### File Operations & Clipboard
 - Queued **Copy** and **Move** actions with multi-file support.
@@ -47,7 +47,7 @@ Local desktop file and project tracker with change detection, revision managemen
 
 ### Data Safety & Recovery
 - Recycle bin for file removals (soft delete with restore option).
-- Project-scoped recycle bin restore (prevents cross-project mixing).
+- Project-scoped recycle bin restore with multi-select and Restore All support.
 - Auto-backup before data-destructive operations (Reset, Restore).
 - Session capture/restore via ZIP with default paths in `Backups/Session/`.
 
@@ -62,6 +62,7 @@ Local desktop file and project tracker with change detection, revision managemen
 	- `Ctrl+Z` → Undo last supported operation
 	- **`Backspace`** → Go back one folder level
 	- `Delete` → Remove selected file/folder or note
+	- `F2` → Rename selected file or folder
 	- `F5` → Global refresh
 
 ## Technical Stack
@@ -106,6 +107,7 @@ Local desktop file and project tracker with change detection, revision managemen
 | `Ctrl+V` | Paste queued items (with collision handling) |
 | `Ctrl+Z` | Undo last file operation |
 | `Delete` | Soft-delete selected item to recycle bin |
+| `F2` | Rename selected file or folder |
 
 ## Performance Notes
 
@@ -129,6 +131,7 @@ Local desktop file and project tracker with change detection, revision managemen
 
 ## Version History
 
+- **3.2** – Multi-select + Restore All in recycle bin and auto-backup restore dialogs; F2 rename for files and folders; Ctrl+A in recycle bin dialog; full horizontal and vertical scrollbars on all text boxes; restore history logging.
 - **3.1** – Fixed folder ZIP naming (preserves dots in folder names), enhanced reset to force-delete locked folders, cleanup.
 - **3.0** – Performance optimization, terminal integration, long-path support on Windows.
 - **2.x** – Initial stable release.

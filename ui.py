@@ -19,7 +19,7 @@ from csv_manager import CSVManager
 from file_scanner import compute_checksum, scan_project_files_with_cache
 from models import ChangeRecord, Project, TrackedFile
 
-APP_VERSION = "3.0"
+APP_VERSION = "3.2"
 APP_SETTINGS_FILE = "app_settings.json"
 SHARED_REPO_SETTINGS_DIR = "Project Repository File Manager"
 SHARED_REPO_SETTINGS_FILE = "shared_settings.json"
@@ -117,6 +117,7 @@ class DocumentTrackerApp:
         self.settings_window_icon = self._create_gear_icon()
         self.reset_window_icon = self._create_warning_icon()
         self.backup_window_icon = self._create_backup_icon()
+        self.restore_window_icon = self._create_restore_icon()
         self.add_project_window_icon = self._create_project_add_icon()
         self.create_file_window_icon = self._create_new_file_window_icon()
         self.create_folder_window_icon = self._create_new_folder_window_icon()
@@ -347,9 +348,19 @@ class DocumentTrackerApp:
 
         detail_label = ttk.Label(self.content_frame, text="File Details")
         detail_label.pack(anchor="w")
-        self.details_text = tk.Text(self.content_frame, height=10, wrap="word", state="disabled")
+        details_frame = ttk.Frame(self.content_frame)
+        details_frame.pack(fill="both", expand=True, padx=(0, 4), pady=(0, 4))
+        details_frame.columnconfigure(0, weight=1)
+        details_frame.rowconfigure(0, weight=1)
+        self.details_text = tk.Text(details_frame, height=10, wrap="none", state="disabled")
         self.details_text_base_height = 10
-        self.details_text.pack(fill="both", expand=True, padx=(0, 4), pady=(0, 4))
+        self.details_text.grid(row=0, column=0, sticky="nsew")
+        details_scrollbar_y = ttk.Scrollbar(details_frame, orient="vertical", command=self.details_text.yview)
+        details_scrollbar_y.grid(row=0, column=1, sticky="ns")
+        details_scrollbar_x = ttk.Scrollbar(details_frame, orient="horizontal", command=self.details_text.xview)
+        details_scrollbar_x.grid(row=1, column=0, sticky="ew")
+        self.details_text.configure(yscrollcommand=details_scrollbar_y.set, xscrollcommand=details_scrollbar_x.set)
+        self._bind_widget_mousewheel(self.details_text)
         history_label = ttk.Label(self.content_frame, text="Project Change History")
         history_label.pack(anchor="w", pady=(2, 0))
         self.history_filter_combo = ttk.Combobox(self.content_frame, state="readonly", width=20)
@@ -357,9 +368,19 @@ class DocumentTrackerApp:
         self.history_filter_combo.set("ALL")
         self.history_filter_combo.bind("<<ComboboxSelected>>", lambda event: self._show_history())
         self.history_filter_combo.pack(anchor="w", pady=(2, 2))
-        self.history_text = tk.Text(self.content_frame, height=10, wrap="word", state="disabled")
+        history_frame = ttk.Frame(self.content_frame)
+        history_frame.pack(fill="both", expand=True, padx=(0, 4), pady=(0, 4))
+        history_frame.columnconfigure(0, weight=1)
+        history_frame.rowconfigure(0, weight=1)
+        self.history_text = tk.Text(history_frame, height=10, wrap="none", state="disabled")
         self.history_text_base_height = 10
-        self.history_text.pack(fill="both", expand=True, padx=(0, 4), pady=(0, 4))
+        self.history_text.grid(row=0, column=0, sticky="nsew")
+        history_scrollbar_y = ttk.Scrollbar(history_frame, orient="vertical", command=self.history_text.yview)
+        history_scrollbar_y.grid(row=0, column=1, sticky="ns")
+        history_scrollbar_x = ttk.Scrollbar(history_frame, orient="horizontal", command=self.history_text.xview)
+        history_scrollbar_x.grid(row=1, column=0, sticky="ew")
+        self.history_text.configure(yscrollcommand=history_scrollbar_y.set, xscrollcommand=history_scrollbar_x.set)
+        self._bind_widget_mousewheel(self.history_text)
         history_button_frame = ttk.Frame(self.content_frame)
         history_button_frame.pack(fill="x", pady=(0, 4))
         self.view_history_button = ttk.Button(history_button_frame, text="View as Text File", command=self.print_project_history)
@@ -367,9 +388,15 @@ class DocumentTrackerApp:
 
         todo_label = ttk.Label(self.content_frame, text="Project Notes")
         todo_label.pack(anchor="w", pady=(2, 0))
-        self.todo_listbox = tk.Listbox(self.content_frame, selectmode="extended")
+        todo_frame = ttk.Frame(self.content_frame)
+        todo_frame.pack(fill="both", expand=True, padx=(0, 4), pady=(0, 4))
+        self.todo_listbox = tk.Listbox(todo_frame, selectmode="extended")
         self.todo_listbox_base_height = 10
-        self.todo_listbox.pack(fill="both", expand=True, padx=(0, 4), pady=(0, 4))
+        self.todo_listbox.pack(side="left", fill="both", expand=True)
+        todo_scrollbar = ttk.Scrollbar(todo_frame, orient="vertical", command=self.todo_listbox.yview)
+        todo_scrollbar.pack(side="right", fill="y")
+        self.todo_listbox.configure(yscrollcommand=todo_scrollbar.set)
+        self._bind_widget_mousewheel(self.todo_listbox)
         self.todo_listbox.bind("<Button-1>", self._todo_listbox_click)
         self.todo_listbox.bind("<Control-Button-1>", self._todo_listbox_ctrl_click)
         self.todo_listbox.bind("<Shift-Button-1>", self._todo_listbox_shift_click)
@@ -400,11 +427,40 @@ class DocumentTrackerApp:
         return subprocess.run(args, **kwargs)
 
     def _bind_right_panel_mousewheel(self, widget: tk.Misc) -> None:
+        scrollable_widgets = {
+            getattr(self, "details_text", None),
+            getattr(self, "history_text", None),
+            getattr(self, "todo_listbox", None),
+        }
+        if widget in scrollable_widgets:
+            return
         widget.bind("<MouseWheel>", self._on_right_panel_mousewheel, add="+")
         widget.bind("<Button-4>", self._on_right_panel_mousewheel, add="+")
         widget.bind("<Button-5>", self._on_right_panel_mousewheel, add="+")
         for child in widget.winfo_children():
             self._bind_right_panel_mousewheel(child)
+
+    def _bind_widget_mousewheel(self, widget: tk.Misc) -> None:
+        widget.bind("<MouseWheel>", lambda event, target=widget: self._on_widget_mousewheel(event, target), add="+")
+        widget.bind("<Button-4>", lambda event, target=widget: self._on_widget_mousewheel(event, target), add="+")
+        widget.bind("<Button-5>", lambda event, target=widget: self._on_widget_mousewheel(event, target), add="+")
+
+    def _on_widget_mousewheel(self, event: tk.Event, widget: tk.Misc) -> str:
+        if getattr(event, "num", None) == 4:
+            delta = -1
+        elif getattr(event, "num", None) == 5:
+            delta = 1
+        else:
+            raw_delta = int(getattr(event, "delta", 0))
+            if raw_delta == 0:
+                return "break"
+            delta = -int(raw_delta / 120) if sys.platform.startswith("win") else (-1 if raw_delta > 0 else 1)
+            if delta == 0:
+                delta = -1 if raw_delta > 0 else 1
+
+        if hasattr(widget, "yview_scroll"):
+            widget.yview_scroll(delta, "units")
+        return "break"
 
     def _set_busy(self, is_busy: bool, message: str = "Processing...") -> None:
         if is_busy:
@@ -831,15 +887,19 @@ class DocumentTrackerApp:
 
         text_frame = ttk.Frame(dialog, padding=(10, 10))
         text_frame.pack(fill="both", expand=True)
+        text_frame.columnconfigure(0, weight=1)
+        text_frame.rowconfigure(0, weight=1)
 
-        about_body = tk.Text(text_frame, wrap="word")
-        about_body.pack(side="left", fill="both", expand=True)
+        about_body = tk.Text(text_frame, wrap="none")
+        about_body.grid(row=0, column=0, sticky="nsew")
         about_body.insert("1.0", about_text)
         about_body.configure(state="disabled")
 
-        scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=about_body.yview)
-        scrollbar.pack(side="right", fill="y")
-        about_body.configure(yscrollcommand=scrollbar.set)
+        scrollbar_y = ttk.Scrollbar(text_frame, orient="vertical", command=about_body.yview)
+        scrollbar_y.grid(row=0, column=1, sticky="ns")
+        scrollbar_x = ttk.Scrollbar(text_frame, orient="horizontal", command=about_body.xview)
+        scrollbar_x.grid(row=1, column=0, sticky="ew")
+        about_body.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
 
         button_row = ttk.Frame(dialog, padding=(10, 0, 10, 10))
         button_row.pack(fill="x")
@@ -1721,6 +1781,24 @@ class DocumentTrackerApp:
         icon.put("#8d6e63", to=(7, 13, 9, 14))
         return icon
 
+    def _create_restore_icon(self) -> tk.PhotoImage:
+        """Blue downward-arrow-into-tray icon representing restoration."""
+        icon = tk.PhotoImage(width=16, height=16)
+        c = "#0078d4"  # Windows blue
+        # Arrow shaft (pointing down)
+        icon.put(c, to=(7, 1, 9, 7))
+        # Arrow head (wide triangle)
+        icon.put(c, to=(4, 7, 12, 9))
+        icon.put(c, to=(5, 9, 11, 11))
+        icon.put(c, to=(6, 11, 10, 12))
+        icon.put(c, to=(7, 12, 9, 13))
+        # Tray at bottom
+        icon.put(c, to=(2, 13, 14, 14))
+        icon.put(c, to=(2, 13, 3, 16))
+        icon.put(c, to=(13, 13, 14, 16))
+        icon.put(c, to=(2, 15, 14, 16))
+        return icon
+
     def _icon_for_extension(self, extension: str) -> tk.PhotoImage:
         ext = extension.lower().strip()
         if ext in {".py", ".pyw"}:
@@ -1858,11 +1936,13 @@ class DocumentTrackerApp:
         content_frame.columnconfigure(0, weight=1)
         content_frame.rowconfigure(0, weight=1)
         dialog.rowconfigure(3, weight=1)
-        desc_text = tk.Text(content_frame, wrap="word", height=8)
+        desc_text = tk.Text(content_frame, wrap="none", height=8)
         desc_text.grid(row=0, column=0, sticky="nsew")
-        desc_sb = ttk.Scrollbar(content_frame, orient="vertical", command=desc_text.yview)
-        desc_sb.grid(row=0, column=1, sticky="ns")
-        desc_text.configure(yscrollcommand=desc_sb.set)
+        desc_sb_y = ttk.Scrollbar(content_frame, orient="vertical", command=desc_text.yview)
+        desc_sb_y.grid(row=0, column=1, sticky="ns")
+        desc_sb_x = ttk.Scrollbar(content_frame, orient="horizontal", command=desc_text.xview)
+        desc_sb_x.grid(row=1, column=0, sticky="ew")
+        desc_text.configure(yscrollcommand=desc_sb_y.set, xscrollcommand=desc_sb_x.set)
         desc_text.insert("1.0", desc_init)
 
         if read_only:
@@ -2163,8 +2243,17 @@ class DocumentTrackerApp:
         editor.geometry("600x320")
 
         ttk.Label(editor, text=f"File Notes for: {self.selected_file.relative_path}").pack(anchor="w", padx=10, pady=(10, 0))
-        note_text = tk.Text(editor, wrap="word", width=72, height=12)
-        note_text.pack(fill="both", expand=True, padx=10, pady=(6, 10))
+        note_frame = ttk.Frame(editor)
+        note_frame.pack(fill="both", expand=True, padx=10, pady=(6, 10))
+        note_frame.columnconfigure(0, weight=1)
+        note_frame.rowconfigure(0, weight=1)
+        note_text = tk.Text(note_frame, wrap="none", width=72, height=12)
+        note_text.grid(row=0, column=0, sticky="nsew")
+        note_scroll_y = ttk.Scrollbar(note_frame, orient="vertical", command=note_text.yview)
+        note_scroll_y.grid(row=0, column=1, sticky="ns")
+        note_scroll_x = ttk.Scrollbar(note_frame, orient="horizontal", command=note_text.xview)
+        note_scroll_x.grid(row=1, column=0, sticky="ew")
+        note_text.configure(yscrollcommand=note_scroll_y.set, xscrollcommand=note_scroll_x.set)
         note_text.insert("1.0", self.selected_file.notes or "")
 
         button_frame = ttk.Frame(editor)
@@ -2782,6 +2871,8 @@ class DocumentTrackerApp:
             # ── Unsupported binary / special file ───────────────────────────
             info_frame = ttk.Frame(win, padding=20)
             info_frame.grid(row=1, column=0, sticky="nsew")
+            info_frame.columnconfigure(0, weight=1)
+            info_frame.rowconfigure(1, weight=1)
             ttk.Label(
                 info_frame,
                 text=f"Side-by-side text comparison is not supported for '{ext or 'no extension'}' files.",
@@ -2804,10 +2895,19 @@ class DocumentTrackerApp:
             )
             is_same = (prev_snapshot.stem.split('__')[-1] if '__' in prev_snapshot.stem else None) == self.selected_file.checksum
             details += f"Identical: {'Yes' if is_same else 'No'}\n"
-            text_box = tk.Text(info_frame, wrap="word", height=14, state="normal", font=("TkFixedFont", 9))
+            text_container = ttk.Frame(info_frame)
+            text_container.pack(fill="both", expand=True)
+            text_container.columnconfigure(0, weight=1)
+            text_container.rowconfigure(0, weight=1)
+            text_box = tk.Text(text_container, wrap="none", height=14, state="normal", font=("TkFixedFont", 9))
             text_box.insert("1.0", details)
             text_box.config(state="disabled")
-            text_box.pack(fill="both", expand=True)
+            text_box.grid(row=0, column=0, sticky="nsew")
+            text_box_scroll_y = ttk.Scrollbar(text_container, orient="vertical", command=text_box.yview)
+            text_box_scroll_y.grid(row=0, column=1, sticky="ns")
+            text_box_scroll_x = ttk.Scrollbar(text_container, orient="horizontal", command=text_box.xview)
+            text_box_scroll_x.grid(row=1, column=0, sticky="ew")
+            text_box.configure(yscrollcommand=text_box_scroll_y.set, xscrollcommand=text_box_scroll_x.set)
             return
 
         # ── Load text content ────────────────────────────────────────────────
@@ -2950,8 +3050,37 @@ class DocumentTrackerApp:
         if change_type == "META_UPDATE":
             return f"Metadata updated for '{new_value or old_value}': {note}"
         if change_type == "RESTORE":
+            note_lower = note.lower()
+            if "recycle" in note_lower:
+                return f"Restored '{new_value or old_value or file_id}' from recycle bin."
+            if "auto-backup" in note_lower:
+                return f"Restored project data from auto-backup: '{new_value or old_value or file_id}'."
+            if "session" in note_lower:
+                return f"Restored session archive data for '{new_value or old_value or file_id}'."
             return f"Restored previous revision for '{new_value or old_value or file_id}'."
         return f"{change_type} for file '{new_value or old_value or file_id}': {note}"
+
+    def _append_history_record(
+        self,
+        project_id: str,
+        change_type: str,
+        old_value: str = "",
+        new_value: str = "",
+        note: str = "",
+        file_id: str = "",
+    ) -> None:
+        self.csv.append_row(
+            "change_log",
+            ChangeRecord(
+                timestamp=datetime.now().isoformat(),
+                project_id=project_id,
+                file_id=file_id,
+                change_type=change_type,
+                old_value=old_value,
+                new_value=new_value,
+                note=note,
+            ).to_dict(),
+        )
 
     def _sort_treeview(self, tree: ttk.Treeview, col: str, reverse: bool) -> bool:
         if col == "path":
@@ -3170,6 +3299,55 @@ class DocumentTrackerApp:
             old_value=self.selected_file.relative_path,
             new_value=new_relative,
             note="Renamed file inside application.",
+        )
+        self.csv.append_row("change_log", change.to_dict())
+        self.undo_stack.append({
+            "type": "rename",
+            "project_id": self.selected_project.project_id,
+            "source": str(current_path),
+            "target": str(new_path),
+        })
+        self.refresh_files()
+        self._show_history()
+
+    def rename_folder(self) -> None:
+        if not self.selected_project or self.selected_item_kind != "folder" or not self.selected_item_rel:
+            return
+        project_root = Path(self.selected_project.root_path)
+        current_path = project_root / Path(self.selected_item_rel)
+        if not current_path.exists() or not current_path.is_dir():
+            messagebox.showerror("Folder missing", "The selected folder does not exist on disk.")
+            return
+        new_name = simpledialog.askstring("Rename folder", "Enter new folder name:", initialvalue=current_path.name, parent=self.root)
+        if not new_name or new_name == current_path.name:
+            return
+        new_path = current_path.with_name(new_name)
+        if new_path.exists():
+            messagebox.showerror("Rename failed", "A folder with that name already exists.")
+            return
+        try:
+            os.rename(self._path_for_python_io(current_path), self._path_for_python_io(new_path))
+        except Exception as exc:
+            messagebox.showerror("Rename failed", f"Could not rename folder: {exc}")
+            return
+        old_rel = self.selected_item_rel.replace("\\", "/")
+        new_rel_base = str(new_path.relative_to(project_root)).replace("\\", "/")
+        # Update all file rows whose relative_path is inside this folder
+        file_rows = self.csv.read_rows("files")
+        prefix = old_rel + "/"
+        for row in file_rows:
+            rel = row.get("relative_path", "").replace("\\", "/")
+            if rel == old_rel or rel.startswith(prefix):
+                row["relative_path"] = new_rel_base + rel[len(old_rel):]
+        self.csv.write_rows("files", file_rows)
+        change = ChangeRecord(
+            timestamp=datetime.now().isoformat(),
+            project_id=self.selected_project.project_id,
+            file_id="",
+            change_type="RENAME",
+            old_value=old_rel,
+            new_value=new_rel_base,
+            note="Renamed folder inside application.",
         )
         self.csv.append_row("change_log", change.to_dict())
         self.undo_stack.append({
@@ -3788,6 +3966,17 @@ class DocumentTrackerApp:
             with zipfile.ZipFile(source, "r") as archive:
                 archive.extractall(base)
             self._auto_sync_repository()
+            for row in self.csv.read_rows("projects"):
+                project_id = row.get("project_id", "")
+                project_name = row.get("project_name", "")
+                if project_id and project_name and not self._is_internal_project_row(row):
+                    self._append_history_record(
+                        project_id=project_id,
+                        change_type="RESTORE",
+                        old_value=Path(source).name,
+                        new_value=project_name,
+                        note="Restored from session archive.",
+                    )
             self.refresh_projects()
             self.refresh_files()
             self._show_history()
@@ -3841,74 +4030,115 @@ class DocumentTrackerApp:
             messagebox.showinfo("Restore", "No projects found in this backup.")
             return
 
-        # Show project selection dialog
+        # Show project selection dialog (multi-select)
         dialog = tk.Toplevel(self.root)
-        dialog.title("Select Project to Restore")
+        dialog.title("Select Projects to Restore")
         dialog.transient(self.root)
         dialog.grab_set()
-        dialog.geometry("400x300")
+        dialog.geometry("420x360")
         dialog.columnconfigure(0, weight=1)
         dialog.rowconfigure(1, weight=1)
+        dialog.iconphoto(False, self.restore_window_icon)
 
-        ttk.Label(dialog, text=f"Projects in backup:\n{backup_folder_path.name}", font=("TkDefaultFont", 9)).pack(anchor="w", padx=12, pady=(12, 8))
+        ttk.Label(dialog, text=f"Projects in backup:\n{backup_folder_path.name}", font=("TkDefaultFont", 9)).pack(anchor="w", padx=12, pady=(12, 4))
 
-        listbox = tk.Listbox(dialog, height=10)
-        listbox.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        list_frame = ttk.Frame(dialog)
+        list_frame.pack(fill="both", expand=True, padx=12, pady=(0, 2))
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+
+        listbox = tk.Listbox(list_frame, height=10, selectmode="extended")
+        listbox.grid(row=0, column=0, sticky="nsew")
+        lb_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=listbox.yview)
+        lb_scroll.grid(row=0, column=1, sticky="ns")
+        listbox.configure(yscrollcommand=lb_scroll.set)
         for project in sorted(projects):
             listbox.insert("end", project)
 
-        selected_project = {}
+        ttk.Label(dialog, text="Hold Ctrl or Shift to select multiple projects.", font=("TkDefaultFont", 8), foreground="gray").pack(anchor="w", padx=12, pady=(2, 6))
+
+        selected_projects: list[str] = []
 
         def do_restore() -> None:
             selection = listbox.curselection()
             if not selection:
-                messagebox.showwarning("Restore", "Please select a project.", parent=dialog)
+                messagebox.showwarning("Restore", "Please select at least one project.", parent=dialog)
                 return
-            selected_project["name"] = listbox.get(selection[0])
+            selected_projects.extend([listbox.get(i) for i in selection])
             dialog.destroy()
+
+        def do_restore_all() -> None:
+            listbox.select_set(0, "end")
+            do_restore()
 
         btn_row = ttk.Frame(dialog)
         btn_row.pack(side="bottom", fill="x", padx=12, pady=(0, 12))
 
-        ttk.Button(btn_row, text="Restore", command=do_restore).pack(side="right")
+        ttk.Button(btn_row, text="Restore Selected", command=do_restore).pack(side="right")
+        ttk.Button(btn_row, text="Restore All", command=do_restore_all).pack(side="right", padx=(0, 8))
         ttk.Button(btn_row, text="Cancel", command=dialog.destroy).pack(side="right", padx=(0, 8))
 
         dialog.wait_window()
 
-        if not selected_project:
+        if not selected_projects:
             return
 
-        project_name = selected_project["name"]
-        source_project = projects_dir / project_name
-        target_project = self.repository_folder / project_name
-
-        if target_project.exists():
+        # Warn about any existing projects that will be overwritten
+        conflicts = [n for n in selected_projects if (self.repository_folder / n).exists()]
+        if conflicts:
+            conflict_list = "\n  ".join(conflicts)
             overwrite = messagebox.askyesno(
                 "Restore Project",
-                f"Project '{project_name}' already exists in repository. Overwrite it?",
+                f"The following project(s) already exist in the repository and will be overwritten:\n  {conflict_list}\n\nContinue?",
             )
             if not overwrite:
                 return
 
+        restored_names: list[str] = []
+        errors: list[str] = []
         try:
-            self._set_busy(True, f"Restoring {project_name}...")
-            if target_project.exists() and target_project.is_dir():
-                self._rmtree(target_project)
-            self._copy_folder_tree(source_project, target_project)
+            self._set_busy(True, f"Restoring {len(selected_projects)} project(s)...")
+            for project_name in selected_projects:
+                try:
+                    source_project = projects_dir / project_name
+                    target_project = self.repository_folder / project_name
+                    if target_project.exists() and target_project.is_dir():
+                        self._rmtree(target_project)
+                    self._copy_folder_tree(source_project, target_project)
+                    restored_names.append(project_name)
+                except Exception as exc:
+                    errors.append(f"{project_name}: {exc}")
             self.refresh_repository()
-
-            # Select restored project if it exists in current project list.
-            restored = next((p for p in self.projects if p.project_name == project_name), None)
-            if restored:
-                self.project_tree.selection_set(restored.project_id)
-                self.on_project_select(None)
         except Exception as exc:
-            messagebox.showerror("Restore Project", f"Could not restore project from backup: {exc}")
+            messagebox.showerror("Restore Project", f"Restore failed: {exc}")
             return
         finally:
             self._set_busy(False)
 
-        messagebox.showinfo("Restore Project", f"Project '{project_name}' restored successfully from backup.")
+        for project_name in restored_names:
+            restored_row = next((r for r in self.csv.read_rows("projects") if r.get("project_name") == project_name), None)
+            if restored_row and restored_row.get("project_id"):
+                self._append_history_record(
+                    project_id=restored_row.get("project_id", ""),
+                    change_type="RESTORE",
+                    old_value=backup_folder_path.name,
+                    new_value=project_name,
+                    note="Project restored from auto-backup.",
+                )
+
+        # Select the last restored project if it exists in the current project list
+        if restored_names:
+            restored = next((p for p in self.projects if p.project_name == restored_names[-1]), None)
+            if restored:
+                self.project_tree.selection_set(restored.project_id)
+                self.on_project_select(None)
+
+        if errors:
+            messagebox.showwarning("Restore Project", "Some projects could not be restored:\n" + "\n".join(errors))
+        else:
+            count = len(restored_names)
+            names_str = ", ".join(f"'{n}'" for n in restored_names)
+            messagebox.showinfo("Restore Project", f"{count} project(s) restored successfully from backup:\n{names_str}")
 
     def _bind_shortcuts(self) -> None:
         self.root.bind("<Control-f>", lambda event: self._focus_file_search())
@@ -3922,6 +4152,21 @@ class DocumentTrackerApp:
         self.root.bind("<Escape>", self._shortcut_clear_selection)
         self.root.bind("<Control-a>", self._shortcut_select_all)
         self.root.bind("<F5>", lambda event: self.refresh_repository())
+        self.root.bind("<F2>", self._shortcut_rename)
+
+    def _shortcut_rename(self, event: tk.Event) -> str | None:
+        if self._focused_widget_is_text_input():
+            return None
+        focused = self.root.focus_get()
+        if focused != self.file_tree:
+            return None
+        if self.selected_item_kind == "file" and self.selected_file:
+            self.rename_file()
+            return "break"
+        if self.selected_item_kind == "folder" and self.selected_item_rel:
+            self.rename_folder()
+            return "break"
+        return None
 
     def _focused_widget_is_text_input(self) -> bool:
         focused = self.root.focus_get()
@@ -4224,9 +4469,10 @@ class DocumentTrackerApp:
         dialog.title(f"Restore Recycle Bin Item - {self.selected_project.project_name}")
         dialog.transient(self.root)
         dialog.grab_set()
-        dialog.geometry("920x420")
+        dialog.geometry("920x440")
         dialog.columnconfigure(0, weight=1)
         dialog.rowconfigure(0, weight=1)
+        dialog.iconphoto(False, self.restore_window_icon)
 
         tree = ttk.Treeview(dialog, columns=("type", "deleted", "path"), show="headings", selectmode="extended")
         tree.heading("type", text="Type")
@@ -4241,10 +4487,18 @@ class DocumentTrackerApp:
         scroll.grid(row=0, column=1, sticky="ns", pady=10)
         tree.configure(yscrollcommand=scroll.set)
 
+        info_frame = ttk.Frame(dialog)
+        info_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 4))
         ttk.Label(
-            dialog,
+            info_frame,
             text=f"Showing recycle bin items only for project folder: {project_root}",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 8))
+        ).pack(side="left")
+        ttk.Label(
+            info_frame,
+            text="Hold Ctrl or Shift to select multiple items.",
+            font=("TkDefaultFont", 8),
+            foreground="gray",
+        ).pack(side="right")
 
         index_map: dict[str, dict[str, str]] = {}
         for idx, row in enumerate(valid_entries):
@@ -4262,6 +4516,8 @@ class DocumentTrackerApp:
             item_type = str(row.get("item_type", "")).strip() or ("folder" if Path(str(row.get("recycle_path", ""))).is_dir() else "file")
             tree.insert("", "end", iid=iid, values=(item_type.title(), deleted_display, display_path))
             index_map[iid] = row
+
+        tree.bind("<Control-a>", lambda e: (tree.selection_set(tree.get_children()), "break"))
 
         btn_row = ttk.Frame(dialog)
         btn_row.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
@@ -4313,6 +4569,13 @@ class DocumentTrackerApp:
                     continue
                 self._makedirs(original_path.parent)
                 self._move(recycle_path, original_path)
+                self._append_history_record(
+                    project_id=self.selected_project.project_id,
+                    change_type="RESTORE",
+                    old_value=str(recycle_path),
+                    new_value=str(original_path.relative_to(project_root)).replace("\\", "/"),
+                    note="Restored from recycle bin.",
+                )
                 restored_paths.add(str(recycle_path))
                 restored_count += 1
 
@@ -4321,9 +4584,16 @@ class DocumentTrackerApp:
 
             dialog.destroy()
             if restored_count:
+                self.refresh_files()
+                self._show_history()
                 messagebox.showinfo("Restore", f"Restored {restored_count} item(s) from recycle bin.")
 
+        def do_restore_all() -> None:
+            tree.selection_set(tree.get_children())
+            do_restore()
+
         ttk.Button(btn_row, text="Restore Selected", command=do_restore).pack(side="right")
+        ttk.Button(btn_row, text="Restore All", command=do_restore_all).pack(side="right", padx=(0, 8))
         ttk.Button(btn_row, text="Cancel", command=dialog.destroy).pack(side="right", padx=(0, 8))
         dialog.wait_window()
 
