@@ -2,7 +2,7 @@
 
 **Project Repository File Manager** is a local desktop application for organizing project folders, tracking file changes, comparing revisions, restoring snapshots, and managing project notes in a responsive Tkinter workspace.
 
-All data is stored locally in CSV files. No cloud service, external database, or internet connection is required. ✓ Cross-platform support (Windows, macOS, Linux).
+All data is stored locally in CSV files. No cloud service, external database, or internet connection is required. Designed for Windows users.
 
 ## About
 
@@ -72,11 +72,11 @@ Local desktop file and project tracker with change detection, revision managemen
 - **Packaging**: PyInstaller (single-file executable)
 - **Data Storage**: CSV files (human-readable, version-control friendly)
 - **Hashing**: SHA-256 for change detection
-- **Platform**: Windows, macOS, Linux
+- **Platform**: Windows
 
 ## Installation & Usage
 
-1. Download the latest executable: `Project Repository File Manager.exe` (Windows) or run `python main.py` (cross-platform).
+1. Download and run the latest Windows executable: `Project Repository File Manager.exe`.
 2. On first launch, configure the repository path (defaults to `./repository`).
 3. Add projects and files to track; files are scanned for changes on refresh.
 4. Use snapshot/diff workflows to compare and restore file versions.
