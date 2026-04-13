@@ -13,6 +13,7 @@ Project Repository File Manager is shown in-app as a local desktop application f
 - Auto-detects project folders inside the built-in `repository` directory on launch and during global refresh.
 - Repository path is configurable from `Settings`, including OneDrive-synced SharePoint folders.
 - Global `Refresh` scans the entire repository and updates all projects and tracked file records.
+- Refresh uses checksum reuse for unchanged files to reduce scan time on large repositories.
 - Snapshot support for tracked files (used by compare/restore workflows).
 - Diff view for text-readable files using previous snapshots, with metadata fallback for non-text files.
 - Restore previous revision for a selected tracked file.
@@ -32,6 +33,9 @@ Project Repository File Manager is shown in-app as a local desktop application f
 - Restore project from auto-backup by selecting a timestamped backup folder.
 - Recycle-bin restore is project-scoped to prevent cross-project file mixing.
 - File context menu tools: `Extract Selected Archives Here`, `Compress Selected to ZIP`, and `Compress Folder to ZIP`.
+- Name collisions now support numbered suffixes:
+	- Archive extraction auto-renames duplicates to `name(1)`, `name(2)`, etc.
+	- Copy/Move paste prompts the user to proceed with numbered duplicate names.
 - Activity dashboard with totals and most active project.
 - Responsive right-side panel with scrollable Details, History, and Project Notes sections.
 - Keyboard shortcuts:
@@ -59,7 +63,7 @@ Project Repository File Manager is shown in-app as a local desktop application f
 - `Project Repository File Manager.bat`: Windows launcher with Python detection and venv bootstrapping.
 - `app_settings.json`: stores app settings such as custom repository path.
 - `repository/`: project folders tracked by the app.
-- `projects.csv`, `files.csv`, `change_log.csv`, `todos.csv`: local data files.
+- `repository/Project Repository File Manager/`: app data folder (`projects.csv`, `files.csv`, `change_log.csv`, `todos.csv`, `item_inventory.csv`).
 - `snapshots/`: automatic file snapshots for compare/restore features.
 - `recycle_bin/`: removed files/folders before permanent cleanup.
 
@@ -168,14 +172,15 @@ To reduce accidental or unauthorized backup changes, apply these controls in Sha
 
 ## Data Files
 
-The app stores data in these CSV files in the application folder:
+The app stores data in these CSV files inside `repository/Project Repository File Manager/`:
 
 - `projects.csv`
 - `files.csv`
 - `change_log.csv`
 - `todos.csv`
+- `item_inventory.csv`
 
-When running the packaged executable, data files are created beside the `.exe` on first launch.
+When running the packaged executable, the data folder is created under the configured repository path on first launch.
 
 If legacy CSV files exist from an older location, they are migrated automatically on startup.
 

@@ -1,5 +1,6 @@
 import os
 import json
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -15,7 +16,7 @@ from typing import List, Optional
 
 from change_detector import detect_changes
 from csv_manager import CSVManager
-from file_scanner import compute_checksum, scan_project_files
+from file_scanner import compute_checksum, scan_project_files, scan_project_files_with_cache
 from models import ChangeRecord, Project, TrackedFile
 
 APP_VERSION = "3.0"
@@ -79,6 +80,7 @@ class DocumentTrackerApp:
         self.selected_item_kind: str = ""
         self.selected_item_rel: str = ""
         self.pending_file_operation: Optional[dict[str, object]] = None
+        self._suspend_untracked_sync = False
         self.undo_stack: List[dict[str, object]] = []
         self.sort_state = {
             "projects": {"name": False, "tags": False},
@@ -113,6 +115,8 @@ class DocumentTrackerApp:
         top_frame.columnconfigure(1, weight=1)
         self.about_window_icon = self._create_info_icon()
         self.settings_window_icon = self._create_gear_icon()
+        self.reset_window_icon = self._create_warning_icon()
+        self.backup_window_icon = self._create_backup_icon()
         self.add_project_window_icon = self._create_project_add_icon()
         self.create_file_window_icon = self._create_new_file_window_icon()
         self.create_folder_window_icon = self._create_new_folder_window_icon()
@@ -263,7 +267,7 @@ class DocumentTrackerApp:
         self.busy_message_var = tk.StringVar(value="")
         self.busy_detail_var = tk.StringVar(value="")
 
-        self.busy_label = ttk.Label(self.busy_container, textvariable=self.busy_message_var)
+        self.busy_label = ttk.Label(self.busy_container, textvariable=self.busy_message_var, anchor="w")
         self.busy_label.pack(side="left", padx=(0, 6))
 
         self.busy_progress = ttk.Progressbar(
@@ -404,6 +408,9 @@ class DocumentTrackerApp:
             if self._busy_started_at is None:
                 self._busy_started_at = time.monotonic()
 
+            # Clear first to avoid stale glyph artifacts on some Windows setups.
+            self.busy_message_var.set("")
+            self.root.update_idletasks()
             self.busy_message_var.set(message)
             self.busy_detail_var.set("")
             self._busy_mode = "indeterminate"
@@ -439,6 +446,9 @@ class DocumentTrackerApp:
         clamped_value = max(0.0, min(value, max_value))
         self.busy_progress["value"] = clamped_value
         if message is not None:
+            # Force a clean repaint before drawing the next status text.
+            self.busy_message_var.set("")
+            self.root.update_idletasks()
             self.busy_message_var.set(message)
         if max_value > 0:
             self.busy_detail_var.set(f"{int(clamped_value)} / {int(max_value)}")
@@ -834,6 +844,7 @@ class DocumentTrackerApp:
     def reset_all_data(self) -> None:
         confirm_dialog = tk.Toplevel(self.root)
         confirm_dialog.title("Reset All Data")
+        confirm_dialog.iconphoto(False, self.reset_window_icon)
         confirm_dialog.transient(self.root)
         confirm_dialog.grab_set()
         confirm_dialog.geometry("420x180")
@@ -1042,27 +1053,25 @@ class DocumentTrackerApp:
             messagebox.showwarning("Select project", "Please select a project first.")
             return
         self.refresh_files()
-        initial_dir = Path(self.selected_project.root_path)
+        project_root = Path(self.selected_project.root_path).resolve()
+        current_dir = (project_root / self.current_folder_rel) if self.current_folder_rel else project_root
+        current_dir.mkdir(parents=True, exist_ok=True)
         selected = filedialog.askopenfilenames(
             title="Select files to track",
-            initialdir=initial_dir,
+            initialdir=current_dir,
         )
         if not selected:
             return
         for path_str in selected:
             source_path = Path(path_str).resolve()
-            try:
-                relative = source_path.relative_to(initial_dir)
-            except ValueError:
-                relative = None
 
-            destination_path = self._copy_file_to_project(source_path, initial_dir)
+            destination_path = self._copy_file_to_project(source_path, current_dir)
             if destination_path is None:
                 continue
 
-            if relative is not None:
-                relative_path = str(relative).replace("\\", "/")
-            else:
+            try:
+                relative_path = str(destination_path.relative_to(project_root)).replace("\\", "/")
+            except ValueError:
                 relative_path = destination_path.name
 
             if any(file.relative_path == relative_path for file in self.tracked_files):
@@ -1087,10 +1096,12 @@ class DocumentTrackerApp:
         if not self.selected_project:
             messagebox.showwarning("Select project", "Please select a project first.")
             return
-        project_root = Path(self.selected_project.root_path).resolve()
+        project_root = Path(self.selected_project.root_path).expanduser().resolve()
+        current_dir = (project_root / self.current_folder_rel) if self.current_folder_rel else project_root
+        current_dir.mkdir(parents=True, exist_ok=True)
         selected_folder = filedialog.askdirectory(
             title="Select folder to add",
-            initialdir=project_root,
+            initialdir=current_dir,
         )
         if not selected_folder:
             return
@@ -1109,11 +1120,11 @@ class DocumentTrackerApp:
         except ValueError:
             pass
 
-        destination_folder = project_root / source_folder.name
+        destination_folder = current_dir / source_folder.name
         if destination_folder.exists():
             overwrite = messagebox.askyesno(
                 "Folder exists",
-                f"The folder '{source_folder.name}' already exists in this project. Overwrite it?",
+                f"The folder '{source_folder.name}' already exists here. Overwrite it?",
             )
             if not overwrite:
                 return
@@ -1125,14 +1136,107 @@ class DocumentTrackerApp:
 
         try:
             self._set_busy(True, "Copying folder contents...")
-            shutil.copytree(source_folder, destination_folder)
+            current_dir.mkdir(parents=True, exist_ok=True)
+            self._copy_folder_tree(source_folder, destination_folder)
             self._sync_untracked_files()
             self.refresh_files()
         except Exception as exc:
-            messagebox.showerror("Copy failed", f"Unable to add folder: {exc}")
+            messagebox.showerror(
+                "Copy failed",
+                "Unable to add folder.\n\n"
+                f"Source: {source_folder}\n"
+                f"Destination: {destination_folder}\n\n"
+                f"Details: {exc}",
+            )
             return
         finally:
             self._set_busy(False)
+
+    def _copy_folder_tree(self, source_folder: Path, destination_folder: Path) -> None:
+        if os.name == "nt":
+            # robocopy uses plain Windows paths and handles long paths, special
+            # characters, and deep trees far more reliably than shutil on Windows.
+            result = subprocess.run(
+                [
+                    "robocopy",
+                    str(source_folder),
+                    str(destination_folder),
+                    "/E",       # copy all subdirectories including empty ones
+                    "/XJ",      # exclude junctions to avoid infinite loops
+                    "/R:1",     # retry once on failure
+                    "/W:1",     # wait 1 second between retries
+                    "/NFL",     # no file list in output
+                    "/NDL",     # no dir list in output
+                    "/NJH",     # no job header
+                    "/NJS",     # no job summary
+                    "/NP",      # no progress percentage
+                ],
+                capture_output=True,
+                text=True,
+            )
+            # robocopy exit codes 0-7 are all success variants.
+            if result.returncode <= 7:
+                return
+            details = (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"Robocopy exited with code {result.returncode}."
+            )
+            raise RuntimeError(details)
+
+        # Non-Windows fallback.
+        shutil.copytree(source_folder, destination_folder, ignore_dangling_symlinks=True)
+
+    def _copy_file_with_fallback(self, source_path: Path, destination_path: Path) -> None:
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if os.name == "nt":
+            result = subprocess.run(
+                [
+                    "robocopy",
+                    str(source_path.parent),
+                    str(destination_path.parent),
+                    source_path.name,
+                    "/R:1",
+                    "/W:1",
+                    "/NFL",
+                    "/NDL",
+                    "/NJH",
+                    "/NJS",
+                    "/NP",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode <= 7:
+                copied = destination_path.parent / source_path.name
+                if copied.exists() and copied != destination_path:
+                    if destination_path.exists():
+                        destination_path.unlink()
+                    copied.replace(destination_path)
+                return
+
+        shutil.copy2(source_path, destination_path)
+
+    def _path_for_python_io(self, path_value: Path) -> str:
+        path_text = str(path_value)
+        if os.name != "nt":
+            return path_text
+        if path_text.startswith("\\\\?\\"):
+            return path_text
+        if path_text.startswith("\\\\"):
+            return "\\\\?\\UNC\\" + path_text.lstrip("\\")
+        return "\\\\?\\" + path_text
+
+    def _file_size_safe(self, path_value: Path) -> int:
+        return os.path.getsize(self._path_for_python_io(path_value))
+
+    def _compute_checksum_safe(self, path_value: Path) -> str:
+        sha256 = hashlib.sha256()
+        with open(self._path_for_python_io(path_value), "rb") as handle:
+            for chunk in iter(lambda: handle.read(8192), b""):
+                sha256.update(chunk)
+        return sha256.hexdigest()
 
     def _copy_file_to_project(self, source_path: Path, project_root: Path) -> Optional[Path]:
         destination = project_root / source_path.name
@@ -1146,16 +1250,12 @@ class DocumentTrackerApp:
                 destination.unlink()
             else:
                 return None
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        with source_path.open("rb") as reader, destination.open("wb") as writer:
-            while True:
-                chunk = reader.read(8192)
-                if not chunk:
-                    break
-                writer.write(chunk)
+        self._copy_file_with_fallback(source_path, destination)
         return destination
 
     def _sync_untracked_files(self) -> None:
+        if self._suspend_untracked_sync:
+            return
         if not self.selected_project:
             return
         project_root = Path(self.selected_project.root_path)
@@ -1454,6 +1554,23 @@ class DocumentTrackerApp:
         icon.put(hub_color, to=(6, 6, 7, 7))
         return icon
 
+    def _create_warning_icon(self) -> tk.PhotoImage:
+        icon = tk.PhotoImage(width=16, height=16)
+        icon.put("#f4b400", to=(2, 2, 13, 13))
+        icon.put("#c49000", to=(2, 13, 13, 13))
+        icon.put("#ffffff", to=(7, 5, 8, 9))
+        icon.put("#ffffff", to=(7, 11, 8, 11))
+        return icon
+
+    def _create_backup_icon(self) -> tk.PhotoImage:
+        icon = tk.PhotoImage(width=16, height=16)
+        icon.put("#2e7d32", to=(2, 5, 13, 13))
+        icon.put("#1b5e20", to=(2, 4, 13, 5))
+        icon.put("#a5d6a7", to=(4, 2, 11, 5))
+        icon.put("#ffffff", to=(7, 7, 8, 11))
+        icon.put("#ffffff", to=(6, 10, 9, 10))
+        return icon
+
     def _create_project_add_icon(self) -> tk.PhotoImage:
         icon = tk.PhotoImage(width=16, height=16)
         icon.put("#d4a62f", to=(1, 4, 14, 13))
@@ -1661,7 +1778,7 @@ class DocumentTrackerApp:
                 t = title_var.get().strip()
                 d = desc_text.get("1.0", tk.END).strip()
                 if not t:
-                    messagebox.showwarning("Note", "Title cannot be empty.", parent=dialog)
+                    messagebox.showwarning("Note", "Title cannot be empty.", parent=self.root)
                     return
                 result[0] = (t, d)
                 dialog.destroy()
@@ -1677,7 +1794,7 @@ class DocumentTrackerApp:
                 t = title_var.get().strip()
                 d = desc_text.get("1.0", tk.END).strip()
                 if not t:
-                    messagebox.showwarning("Note", "Title cannot be empty.", parent=dialog)
+                    messagebox.showwarning("Note", "Title cannot be empty.", parent=self.root)
                     return
                 result[0] = (t, d)
                 dialog.destroy()
@@ -2195,6 +2312,25 @@ class DocumentTrackerApp:
         project_root = Path(self.selected_project.root_path)
         return project_root / Path(self.current_folder_rel) if self.current_folder_rel else project_root
 
+    def _unique_dest_path(self, parent: Path, name: str, is_folder: bool = False) -> Path:
+        """Return parent/name if it doesn't exist, otherwise parent/name(1), name(2), …"""
+        candidate = parent / name
+        if not candidate.exists():
+            return candidate
+        if is_folder:
+            stem = name
+            suffix = ""
+        else:
+            stem = Path(name).stem
+            suffix = Path(name).suffix
+        counter = 1
+        while True:
+            new_name = f"{stem}({counter}){suffix}"
+            candidate = parent / new_name
+            if not candidate.exists():
+                return candidate
+            counter += 1
+
     def _safe_extract_zip(self, archive: zipfile.ZipFile, destination: Path) -> None:
         destination_resolved = destination.resolve()
         for member in archive.infolist():
@@ -2202,7 +2338,38 @@ class DocumentTrackerApp:
             resolved_member = member_path.resolve()
             if resolved_member != destination_resolved and destination_resolved not in resolved_member.parents:
                 raise RuntimeError(f"Unsafe archive entry detected: {member.filename}")
-        archive.extractall(destination)
+        # Detect the top-level name(s) in the archive and auto-rename on collision.
+        top_names = {Path(m.filename).parts[0] for m in archive.infolist() if m.filename.strip("/")}
+        top_name_is_folder: dict[str, bool] = {}
+        for member in archive.infolist():
+            if not member.filename.strip("/"):
+                continue
+            parts = Path(member.filename).parts
+            top_name = parts[0]
+            top_name_is_folder[top_name] = member.is_dir() or len(parts) > 1
+        renames: dict[str, str] = {}
+        for top in top_names:
+            if (destination / top).exists():
+                unique = self._unique_dest_path(destination, top, is_folder=top_name_is_folder.get(top, False))
+                renames[top] = unique.name
+        if not renames:
+            archive.extractall(destination)
+            return
+        # Extract each member, rewriting the path for renamed top-level entries.
+        for member in archive.infolist():
+            parts = Path(member.filename).parts
+            if not parts:
+                continue
+            new_parts = list(parts)
+            if parts[0] in renames:
+                new_parts[0] = renames[parts[0]]
+            target = destination / Path(*new_parts)
+            if member.filename.endswith("/"):
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member) as src, target.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
 
     def extract_selected_archives_here(self) -> None:
         if not self.selected_project:
@@ -2383,12 +2550,19 @@ class DocumentTrackerApp:
                 continue
 
             target_path = destination_dir / source_path.name
-            if target_path.exists():
-                skipped.append(f"Already exists: {target_path.name}")
-                continue
             if target_path == source_path:
                 skipped.append(f"Same destination: {relative_path}")
                 continue
+            if target_path.exists():
+                suggested = self._unique_dest_path(destination_dir, source_path.name, is_folder=(kind == "folder"))
+                if not messagebox.askyesno(
+                    "Name conflict",
+                    f"'{source_path.name}' already exists in the destination.\n\n"
+                    f"Rename to '{suggested.name}' and proceed?",
+                ):
+                    skipped.append(f"Skipped (conflict): {target_path.name}")
+                    continue
+                target_path = suggested
             if kind == "folder":
                 try:
                     target_path.relative_to(source_path)
@@ -2405,7 +2579,7 @@ class DocumentTrackerApp:
                         shutil.move(str(source_path), str(target_path))
                 else:
                     if operation == "copy":
-                        shutil.copy2(source_path, target_path)
+                        self._copy_file_with_fallback(source_path, target_path)
                     else:
                         shutil.move(str(source_path), str(target_path))
                 if operation == "copy":
@@ -2620,7 +2794,7 @@ class DocumentTrackerApp:
             return
         try:
             target_file.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(previous_snapshot, target_file)
+            self._copy_file_with_fallback(previous_snapshot, target_file)
         except Exception as exc:
             messagebox.showerror("Restore failed", f"Could not restore revision: {exc}")
             return
@@ -3206,18 +3380,22 @@ class DocumentTrackerApp:
         """Refresh all repository projects and tracked file metadata globally."""
         try:
             selected_project_id = self.selected_project.project_id if self.selected_project else None
+            self._suspend_untracked_sync = True
 
             self._auto_sync_repository()
             project_rows = self.csv.read_rows("projects")
             all_file_rows = self.csv.read_rows("files")
             updated_all_rows: List[dict] = []
+            tracked_rows_by_project: dict[str, List[dict]] = {}
+            for row in all_file_rows:
+                tracked_rows_by_project.setdefault(row.get("project_id", ""), []).append(row)
             active_projects = [
                 row for row in project_rows
                 if Path(row.get("root_path", "")).exists() and Path(row.get("root_path", "")).is_dir()
             ]
 
-            self._set_busy(True, "Refreshing repository...")
-            self._set_busy_progress(0, maximum=max(1, len(active_projects)), message="Refreshing repository...")
+            self._set_busy(True, "Loading repository...")
+            self._set_busy_progress(0, maximum=max(1, len(active_projects)), message="Preparing scan...")
 
             max_file_id = 0
             for row in all_file_rows:
@@ -3230,11 +3408,20 @@ class DocumentTrackerApp:
                 project_id = project_row.get("project_id", "")
                 root_folder = Path(project_row.get("root_path", ""))
                 project_name = project_row.get("project_name", "") or root_folder.name
-                self._set_busy_progress(index - 1, message=f"Refreshing {project_name}...")
+                self._set_busy_progress(index - 1, message=f"Scanning {project_name}...")
 
-                scanned = list(scan_project_files(root_folder))
+                tracked_rows = tracked_rows_by_project.get(project_id, [])
+                checksum_cache = {
+                    row.get("relative_path", ""): (
+                        str(row.get("file_size", "")),
+                        row.get("last_modified", ""),
+                        row.get("checksum", ""),
+                    )
+                    for row in tracked_rows
+                    if row.get("relative_path")
+                }
+                scanned = list(scan_project_files_with_cache(root_folder, checksum_cache))
                 self._update_item_inventory_for_project(project_id, scanned)
-                tracked_rows = [row for row in all_file_rows if row.get("project_id") == project_id]
                 tracked = [TrackedFile.from_dict(row) for row in tracked_rows]
                 changes = detect_changes(project_id, tracked, scanned)
                 for record in changes:
@@ -3282,21 +3469,25 @@ class DocumentTrackerApp:
 
                 project_row["last_scanned_date"] = datetime.now().isoformat()
                 updated_all_rows.extend(project_updated_rows)
-                self._set_busy_progress(index, message=f"Refreshing {project_name}...")
+                self._set_busy_progress(index, message=f"Scanned {project_name}")
 
             self.csv.write_rows("files", updated_all_rows)
             self.csv.write_rows("projects", project_rows)
 
+            self._set_busy_progress(max(1, len(active_projects)), message="Updating views...")
             self.refresh_projects()
             if selected_project_id and any(row.get("project_id") == selected_project_id for row in project_rows):
                 self.project_tree.selection_set(selected_project_id)
+                self._set_busy_progress(max(1, len(active_projects)), message="Loading selected project...")
                 self.on_project_select(None)
             else:
                 self.selected_project = None
                 self.current_folder_rel = ""
                 self.refresh_files()
+            self._set_busy_progress(max(1, len(active_projects)), message="Updating dashboard...")
             self._update_dashboard()
         finally:
+            self._suspend_untracked_sync = False
             self._set_busy(False)
 
     def _update_item_inventory_for_project(self, project_id: str, scanned_rows: List[dict[str, str]]) -> None:
@@ -3388,6 +3579,7 @@ class DocumentTrackerApp:
 
         progress_dialog = tk.Toplevel(self.root)
         progress_dialog.title("Auto Backup In Progress")
+        progress_dialog.iconphoto(False, self.backup_window_icon)
         progress_dialog.transient(self.root)
         progress_dialog.grab_set()
         progress_dialog.geometry("520x150")
@@ -3414,15 +3606,15 @@ class DocumentTrackerApp:
                     raise RuntimeError("Backup operation was cancelled by user.")
 
                 status_var.set(f"Copying: {src.name}")
-                shutil.copy2(src, dst)
+                self._copy_file_with_fallback(src, dst)
 
                 # Integrity verification: always compare size; checksum for smaller files.
-                src_stat = src.stat()
-                dst_stat = dst.stat()
-                if src_stat.st_size != dst_stat.st_size:
+                src_size = self._file_size_safe(src)
+                dst_size = self._file_size_safe(dst)
+                if src_size != dst_size:
                     raise RuntimeError(f"Copied file size mismatch for '{src}'.")
-                if src_stat.st_size <= 50 * 1024 * 1024:
-                    if compute_checksum(src) != compute_checksum(dst):
+                if src_size <= 50 * 1024 * 1024:
+                    if self._compute_checksum_safe(src) != self._compute_checksum_safe(dst):
                         raise RuntimeError(f"Checksum verification failed for '{src}'.")
 
                 progress["value"] = index
@@ -3432,7 +3624,7 @@ class DocumentTrackerApp:
         except Exception:
             try:
                 if destination.exists():
-                    shutil.rmtree(destination)
+                    shutil.rmtree(destination, ignore_errors=True)
             finally:
                 progress_dialog.destroy()
             raise
@@ -3594,7 +3786,7 @@ class DocumentTrackerApp:
             self._set_busy(True, f"Restoring {project_name}...")
             if target_project.exists() and target_project.is_dir():
                 shutil.rmtree(target_project)
-            shutil.copytree(source_project, target_project)
+            self._copy_folder_tree(source_project, target_project)
             self.refresh_repository()
 
             # Select restored project if it exists in current project list.
@@ -4040,16 +4232,42 @@ class DocumentTrackerApp:
     def _save_snapshot_for_file(self, project_id: str, file_path: Path, relative_path: str) -> None:
         if not file_path.exists() or not file_path.is_file():
             return
-        snapshot_dir = self._snapshot_path_for_relative(project_id, relative_path)
-        snapshot_dir.mkdir(parents=True, exist_ok=True)
-        checksum = compute_checksum(file_path)
-        existing = sorted([p for p in snapshot_dir.iterdir() if p.is_file()])
-        if existing and f"__{checksum}" in existing[-1].name:
-            return
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        ext = file_path.suffix or ".bin"
-        target = snapshot_dir / f"{stamp}__{checksum}{ext}"
-        shutil.copy2(file_path, target)
+        try:
+            snapshot_dir = self._snapshot_path_for_relative(project_id, relative_path)
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            checksum = compute_checksum(file_path)
+            existing = sorted([p for p in snapshot_dir.iterdir() if p.is_file()])
+            if existing and f"__{checksum}" in existing[-1].name:
+                return
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            ext = file_path.suffix or ".bin"
+            target = snapshot_dir / f"{stamp}__{checksum}{ext}"
+            if os.name == "nt":
+                result = subprocess.run(
+                    [
+                        "robocopy",
+                        str(file_path.parent),
+                        str(snapshot_dir),
+                        file_path.name,
+                        f"/A-:RSH",
+                        "/R:1",
+                        "/W:1",
+                        "/NFL", "/NDL", "/NJH", "/NJS", "/NP",
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode <= 7:
+                    # robocopy copies as the original name; rename to snapshot name.
+                    copied = snapshot_dir / file_path.name
+                    if copied.exists() and copied != target:
+                        copied.replace(target)
+                    return
+                # robocopy failed — fall through to shutil
+            shutil.copy2(file_path, target)
+        except Exception:
+            # Snapshot saving is best-effort; never block the main operation.
+            pass
 
     def _update_dashboard(self) -> None:
         self._apply_dashboard_compact_layout()
