@@ -113,6 +113,10 @@ class DocumentTrackerApp:
         top_frame.columnconfigure(1, weight=1)
         self.about_window_icon = self._create_info_icon()
         self.settings_window_icon = self._create_gear_icon()
+        self.add_project_window_icon = self._create_project_add_icon()
+        self.create_file_window_icon = self._create_new_file_window_icon()
+        self.create_folder_window_icon = self._create_new_folder_window_icon()
+        self.note_window_icon = self._create_feather_icon()
         ttk.Button(top_frame, text="About", command=self.show_about).grid(row=0, column=0, sticky="w")
         ttk.Button(top_frame, text="Settings", command=self.open_settings).grid(row=0, column=1, sticky="w", padx=(8, 0))
         self.data_actions_button = ttk.Menubutton(top_frame, text="Data Actions")
@@ -979,6 +983,7 @@ class DocumentTrackerApp:
     def add_project(self) -> None:
         form = tk.Toplevel(self.root)
         form.title("Add Project")
+        form.iconphoto(False, self.add_project_window_icon)
         form.transient(self.root)
         form.grab_set()
         form.geometry("520x260")
@@ -1449,6 +1454,48 @@ class DocumentTrackerApp:
         icon.put(hub_color, to=(6, 6, 7, 7))
         return icon
 
+    def _create_project_add_icon(self) -> tk.PhotoImage:
+        icon = tk.PhotoImage(width=16, height=16)
+        icon.put("#d4a62f", to=(1, 4, 14, 13))
+        icon.put("#e8c35b", to=(1, 2, 9, 5))
+        icon.put("#b98d22", to=(1, 5, 14, 5))
+        icon.put("#2f9e44", to=(10, 9, 15, 14))
+        icon.put("#ffffff", to=(12, 10, 12, 13))
+        icon.put("#ffffff", to=(11, 11, 13, 11))
+        return icon
+
+    def _create_new_file_window_icon(self) -> tk.PhotoImage:
+        icon = tk.PhotoImage(width=16, height=16)
+        icon.put("#f8f9fa", to=(3, 1, 12, 14))
+        icon.put("#b0b0b0", to=(3, 1, 12, 1))
+        icon.put("#b0b0b0", to=(3, 14, 12, 14))
+        icon.put("#b0b0b0", to=(3, 1, 3, 14))
+        icon.put("#b0b0b0", to=(12, 1, 12, 14))
+        icon.put("#e9ecef", to=(10, 1, 12, 3))
+        icon.put("#2f9e44", to=(1, 10, 6, 15))
+        icon.put("#ffffff", to=(3, 11, 3, 14))
+        icon.put("#ffffff", to=(2, 12, 4, 12))
+        return icon
+
+    def _create_new_folder_window_icon(self) -> tk.PhotoImage:
+        icon = tk.PhotoImage(width=16, height=16)
+        icon.put("#f0c240", to=(1, 6, 14, 14))
+        icon.put("#d9a72f", to=(1, 4, 9, 7))
+        icon.put("#b38a1e", to=(1, 7, 14, 7))
+        icon.put("#2f9e44", to=(10, 9, 15, 14))
+        icon.put("#ffffff", to=(12, 10, 12, 13))
+        icon.put("#ffffff", to=(11, 11, 13, 11))
+        return icon
+
+    def _create_feather_icon(self) -> tk.PhotoImage:
+        icon = tk.PhotoImage(width=16, height=16)
+        icon.put("#8d6e63", to=(7, 3, 8, 13))
+        icon.put("#cfd8dc", to=(5, 4, 10, 11))
+        icon.put("#90a4ae", to=(9, 4, 10, 11))
+        icon.put("#b0bec5", to=(4, 7, 6, 9))
+        icon.put("#8d6e63", to=(7, 13, 9, 14))
+        return icon
+
     def _icon_for_extension(self, extension: str) -> tk.PhotoImage:
         ext = extension.lower().strip()
         if ext in {".py", ".pyw"}:
@@ -1567,6 +1614,7 @@ class DocumentTrackerApp:
 
         dialog = tk.Toplevel(self.root)
         dialog.title(window_title)
+        dialog.iconphoto(False, self.note_window_icon)
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.geometry("540x320")
@@ -1993,6 +2041,7 @@ class DocumentTrackerApp:
         target_dir = project_root / Path(self.current_folder_rel) if self.current_folder_rel else project_root
         form = tk.Toplevel(self.root)
         form.title("Create New File")
+        form.iconphoto(False, self.create_file_window_icon)
         form.transient(self.root)
         form.grab_set()
         form.geometry("560x190")
@@ -2075,6 +2124,7 @@ class DocumentTrackerApp:
 
         form = tk.Toplevel(self.root)
         form.title("Create New Folder")
+        form.iconphoto(False, self.create_folder_window_icon)
         form.transient(self.root)
         form.grab_set()
         form.geometry("560x170")
