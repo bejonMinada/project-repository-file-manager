@@ -48,7 +48,7 @@ Local desktop file and project tracker with change detection, revision managemen
 ### Data Safety & Recovery
 - Recycle bin for file removals (soft delete with restore option).
 - Project-scoped recycle bin restore with multi-select and Restore All support.
-- Auto-backup before data-destructive operations (Reset, Restore).
+- Auto-backup before data-destructive operations (Reset).
 - Session capture/restore via ZIP with default paths in `Backups/Session/`.
 
 ### UI & Keyboard Shortcuts
