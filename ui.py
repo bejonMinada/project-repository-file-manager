@@ -16,7 +16,7 @@ from typing import List, Optional
 
 from change_detector import detect_changes
 from csv_manager import CSVManager
-from file_scanner import compute_checksum, scan_project_files, scan_project_files_with_cache
+from file_scanner import compute_checksum, scan_project_files_with_cache
 from models import ChangeRecord, Project, TrackedFile
 
 APP_VERSION = "3.0"
@@ -392,6 +392,12 @@ class DocumentTrackerApp:
         self._update_file_action_buttons_state()
         # Ensure progress bar starts in idle state (no animation or fill)
         self._hide_busy_widgets()
+
+    def _run_subprocess(self, args: list, **kwargs) -> "subprocess.CompletedProcess[str]":
+        """Run a subprocess suppressing any console window on Windows."""
+        if os.name == "nt":
+            kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
+        return subprocess.run(args, **kwargs)
 
     def _bind_right_panel_mousewheel(self, widget: tk.Misc) -> None:
         widget.bind("<MouseWheel>", self._on_right_panel_mousewheel, add="+")
@@ -872,16 +878,17 @@ class DocumentTrackerApp:
                 messagebox.showerror("Auto Backup", f"Could not create backup before reset: {exc}", parent=confirm_dialog)
                 return
             confirm_dialog.destroy()
-            # Delete all project folders on disk (excluding internal project rows)
+            self._set_busy(True, "Resetting all data...")
+            
+            # Delete all project folders on disk with forced deletion
+            failed_deletes = []
             for row in self.csv.read_rows("projects"):
                 if self._is_internal_project_row(row):
                     continue
                 folder = Path(row.get("root_path", ""))
                 if folder.exists() and folder.is_dir():
-                    try:
-                        shutil.rmtree(folder)
-                    except Exception:
-                        pass
+                    if not self._force_delete_tree(folder):
+                        failed_deletes.append(str(folder))
 
             # Clear snapshot and recycle-bin contents while preserving folders.
             for managed_folder in (self.snapshots_folder, self.recycle_bin_folder):
@@ -889,15 +896,26 @@ class DocumentTrackerApp:
                 for child in managed_folder.iterdir():
                     try:
                         if child.is_dir():
-                            shutil.rmtree(child)
+                            self._force_delete_tree(child)
                         else:
-                            child.unlink()
+                            os.unlink(self._path_for_python_io(child))
                     except Exception:
                         pass
 
             # Clear all CSV tables
             for table in ("projects", "files", "change_log", "todos", "item_inventory"):
                 self.csv.write_rows(table, [])
+            
+            # Remove any remaining project folders from the repository directory with force deletion
+            time.sleep(0.3)  # Allow time for file handles to release
+            try:
+                for subfolder in self.repository_folder.iterdir():
+                    if subfolder.is_dir() and subfolder.name != SHARED_REPO_SETTINGS_DIR:
+                        if not self._force_delete_tree(subfolder):
+                            failed_deletes.append(str(subfolder))
+            except Exception:
+                pass
+            
             self.selected_project = None
             self.selected_file = None
             self.current_folder_rel = ""
@@ -913,7 +931,13 @@ class DocumentTrackerApp:
             self.history_text.delete("1.0", tk.END)
             self.history_text.config(state="disabled")
             self.todo_listbox.delete(0, tk.END)
-            messagebox.showinfo("Reset complete", f"Data reset complete. Auto backup saved to:\n{backup_dir}")
+            self._set_busy(False)
+            
+            if failed_deletes:
+                msg = f"Data reset complete. Auto backup saved to:\n{backup_dir}\n\nWarning: Could not delete {len(failed_deletes)} folder(s):\n" + "\n".join(failed_deletes[:5])
+                messagebox.showwarning("Reset complete (with errors)", msg)
+            else:
+                messagebox.showinfo("Reset complete", f"Data reset complete. Auto backup saved to:\n{backup_dir}")
 
         ttk.Button(button_frame, text="Reset", command=do_reset).pack(side="left", padx=(0, 8))
         ttk.Button(button_frame, text="Cancel", command=confirm_dialog.destroy).pack(side="left")
@@ -1129,7 +1153,7 @@ class DocumentTrackerApp:
             if not overwrite:
                 return
             try:
-                shutil.rmtree(destination_folder)
+                self._rmtree(destination_folder)
             except Exception as exc:
                 messagebox.showerror("Copy failed", f"Could not replace existing folder: {exc}")
                 return
@@ -1138,7 +1162,6 @@ class DocumentTrackerApp:
             self._set_busy(True, "Copying folder contents...")
             current_dir.mkdir(parents=True, exist_ok=True)
             self._copy_folder_tree(source_folder, destination_folder)
-            self._sync_untracked_files()
             self.refresh_files()
         except Exception as exc:
             messagebox.showerror(
@@ -1156,7 +1179,7 @@ class DocumentTrackerApp:
         if os.name == "nt":
             # robocopy uses plain Windows paths and handles long paths, special
             # characters, and deep trees far more reliably than shutil on Windows.
-            result = subprocess.run(
+            result = self._run_subprocess(
                 [
                     "robocopy",
                     str(source_folder),
@@ -1188,10 +1211,10 @@ class DocumentTrackerApp:
         shutil.copytree(source_folder, destination_folder, ignore_dangling_symlinks=True)
 
     def _copy_file_with_fallback(self, source_path: Path, destination_path: Path) -> None:
-        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        self._makedirs(destination_path.parent)
 
         if os.name == "nt":
-            result = subprocess.run(
+            result = self._run_subprocess(
                 [
                     "robocopy",
                     str(source_path.parent),
@@ -1212,11 +1235,11 @@ class DocumentTrackerApp:
                 copied = destination_path.parent / source_path.name
                 if copied.exists() and copied != destination_path:
                     if destination_path.exists():
-                        destination_path.unlink()
-                    copied.replace(destination_path)
+                        os.unlink(self._path_for_python_io(destination_path))
+                    os.rename(self._path_for_python_io(copied), self._path_for_python_io(destination_path))
                 return
 
-        shutil.copy2(source_path, destination_path)
+        shutil.copy2(self._path_for_python_io(source_path), self._path_for_python_io(destination_path))
 
     def _path_for_python_io(self, path_value: Path) -> str:
         path_text = str(path_value)
@@ -1227,6 +1250,81 @@ class DocumentTrackerApp:
         if path_text.startswith("\\\\"):
             return "\\\\?\\UNC\\" + path_text.lstrip("\\")
         return "\\\\?\\" + path_text
+
+    def _makedirs(self, path: Path) -> None:
+        """Create directory tree using long-path-safe strings on Windows."""
+        os.makedirs(self._path_for_python_io(path), exist_ok=True)
+
+    def _rmtree(self, path: Path) -> None:
+        """Remove a directory tree using long-path-safe operations on Windows."""
+        if not path.exists():
+            return
+        if os.name == "nt":
+            long_str = self._path_for_python_io(path.resolve())
+            for root, dirs, files in os.walk(long_str, topdown=False):
+                for name in files:
+                    try:
+                        fp = os.path.join(root, name)
+                        os.chmod(fp, 0o777)
+                        os.unlink(fp)
+                    except Exception:
+                        pass
+                for name in dirs:
+                    try:
+                        os.rmdir(os.path.join(root, name))
+                    except Exception:
+                        pass
+            try:
+                os.rmdir(long_str)
+            except Exception:
+                pass
+        else:
+            shutil.rmtree(path, ignore_errors=True)
+
+    def _force_delete_tree(self, path: Path) -> bool:
+        """Force delete directory tree using Windows commands with retries. Returns True if successful."""
+        if not path.exists():
+            return True
+        if os.name != "nt":
+            shutil.rmtree(path, ignore_errors=True)
+            return not path.exists()
+        
+        # On Windows, use rmdir /s /q for forced deletion with retries
+        path_str = str(path.resolve())
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Use Windows rmdir command which can force delete even locked files
+                result = subprocess.run(
+                    f'rmdir /s /q "{path_str}"',
+                    shell=True,
+                    capture_output=True,
+                    timeout=5
+                )
+                # Wait a moment and check if deleted
+                time.sleep(0.2)
+                if not path.exists():
+                    return True
+            except Exception:
+                pass
+            
+            if attempt < max_retries - 1:
+                time.sleep(0.3)  # Wait before retry
+        
+        # Fallback: try Python's rmtree
+        try:
+            self._rmtree(path)
+            time.sleep(0.1)
+        except Exception:
+            pass
+        
+        return not path.exists()
+
+    def _move(self, src: Path, dst: Path) -> None:
+        """Move a file or directory using long-path-safe strings on Windows."""
+        src_str = self._path_for_python_io(src.resolve()) if os.name == "nt" else str(src)
+        dst_str = self._path_for_python_io(dst.resolve()) if os.name == "nt" else str(dst)
+        shutil.move(src_str, dst_str)
 
     def _file_size_safe(self, path_value: Path) -> int:
         return os.path.getsize(self._path_for_python_io(path_value))
@@ -1247,7 +1345,7 @@ class DocumentTrackerApp:
                 "Overwrite file?",
                 f"The file {destination.name} already exists in the project folder. Overwrite?",
             ):
-                destination.unlink()
+                os.unlink(self._path_for_python_io(destination))
             else:
                 return None
         self._copy_file_with_fallback(source_path, destination)
@@ -1261,8 +1359,18 @@ class DocumentTrackerApp:
         project_root = Path(self.selected_project.root_path)
         if not project_root.exists():
             return
-        scanned = list(scan_project_files(project_root))
-        tracked_paths = {row["relative_path"] for row in self.csv.read_rows("files") if row.get("project_id") == self.selected_project.project_id}
+        tracked_rows = [row for row in self.csv.read_rows("files") if row.get("project_id") == self.selected_project.project_id]
+        checksum_cache = {
+            row["relative_path"]: (
+                str(row.get("file_size", "")),
+                row.get("last_modified", ""),
+                row.get("checksum", ""),
+            )
+            for row in tracked_rows
+            if row.get("relative_path")
+        }
+        scanned = list(scan_project_files_with_cache(project_root, checksum_cache))
+        tracked_paths = {row["relative_path"] for row in tracked_rows}
         for row in scanned:
             rel_path = row["relative_path"]
             if rel_path not in tracked_paths:
@@ -2482,7 +2590,7 @@ class DocumentTrackerApp:
                 folder_path = project_root / Path(rel)
                 if not folder_path.exists() or not folder_path.is_dir():
                     continue
-                zip_path = folder_path.with_suffix(".zip")
+                zip_path = folder_path.parent / f"{folder_path.name}.zip"
                 if zip_path.exists() and not messagebox.askyesno(
                     "Compress Folder",
                     f"{zip_path.name} already exists. Overwrite?",
@@ -2574,14 +2682,14 @@ class DocumentTrackerApp:
             try:
                 if kind == "folder":
                     if operation == "copy":
-                        shutil.copytree(source_path, target_path)
+                        self._copy_folder_tree(source_path, target_path)
                     else:
-                        shutil.move(str(source_path), str(target_path))
+                        self._move(source_path, target_path)
                 else:
                     if operation == "copy":
                         self._copy_file_with_fallback(source_path, target_path)
                     else:
-                        shutil.move(str(source_path), str(target_path))
+                        self._move(source_path, target_path)
                 if operation == "copy":
                     undo_items.append({
                         "operation": "copy",
@@ -2944,7 +3052,7 @@ class DocumentTrackerApp:
                     messagebox.showwarning("Name conflict", f"A folder named '{new_name}' already exists.", parent=form)
                     return
                 try:
-                    old_folder.rename(new_folder)
+                    os.rename(self._path_for_python_io(old_folder), self._path_for_python_io(new_folder))
                 except Exception as exc:
                     messagebox.showerror("Rename failed", f"Could not rename folder: {exc}", parent=form)
                     return
@@ -3039,7 +3147,7 @@ class DocumentTrackerApp:
             messagebox.showerror("Rename failed", "A file with that name already exists.")
             return
         try:
-            current_path.rename(new_path)
+            os.rename(self._path_for_python_io(current_path), self._path_for_python_io(new_path))
         except Exception as exc:
             messagebox.showerror("Rename failed", f"Could not rename file: {exc}")
             return
@@ -3185,29 +3293,29 @@ class DocumentTrackerApp:
                     if operation == "copy":
                         if target.exists():
                             if kind == "folder" and target.is_dir():
-                                shutil.rmtree(target)
+                                self._rmtree(target)
                             elif target.is_file():
-                                target.unlink()
+                                os.unlink(self._path_for_python_io(target))
                     elif operation == "move":
                         source = Path(str(item.get("source", "")))
                         if target.exists() and not source.exists():
-                            source.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.move(str(target), str(source))
+                            self._makedirs(source.parent)
+                            self._move(target, source)
 
             elif entry_type == "rename":
                 source = Path(str(entry.get("source", "")))
                 target = Path(str(entry.get("target", "")))
                 if target.exists() and not source.exists():
-                    source.parent.mkdir(parents=True, exist_ok=True)
-                    target.rename(source)
+                    self._makedirs(source.parent)
+                    os.rename(self._path_for_python_io(target), self._path_for_python_io(source))
 
             elif entry_type == "remove":
                 for move in reversed(list(entry.get("moves", []))):
                     recycle_path = Path(str(move.get("recycle", "")))
                     original_path = Path(str(move.get("original", "")))
                     if recycle_path.exists() and not original_path.exists():
-                        original_path.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.move(str(recycle_path), str(original_path))
+                        self._makedirs(original_path.parent)
+                        self._move(recycle_path, original_path)
 
                 rows = list(entry.get("rows", []))
                 if rows:
@@ -3567,14 +3675,14 @@ class DocumentTrackerApp:
             if not resolved.exists() or not resolved.is_dir():
                 continue
             project_target_root = projects_dest / resolved.name
-            project_target_root.mkdir(parents=True, exist_ok=True)
+            self._makedirs(project_target_root)
             for child in resolved.rglob("*"):
                 relative = child.relative_to(resolved)
                 target = project_target_root / relative
                 if child.is_dir():
-                    target.mkdir(parents=True, exist_ok=True)
+                    self._makedirs(target)
                 elif child.is_file():
-                    target.parent.mkdir(parents=True, exist_ok=True)
+                    self._makedirs(target.parent)
                     copy_tasks.append((child, target))
 
         progress_dialog = tk.Toplevel(self.root)
@@ -3624,7 +3732,7 @@ class DocumentTrackerApp:
         except Exception:
             try:
                 if destination.exists():
-                    shutil.rmtree(destination, ignore_errors=True)
+                    self._rmtree(destination)
             finally:
                 progress_dialog.destroy()
             raise
@@ -3785,7 +3893,7 @@ class DocumentTrackerApp:
         try:
             self._set_busy(True, f"Restoring {project_name}...")
             if target_project.exists() and target_project.is_dir():
-                shutil.rmtree(target_project)
+                self._rmtree(target_project)
             self._copy_folder_tree(source_project, target_project)
             self.refresh_repository()
 
@@ -4052,9 +4160,9 @@ class DocumentTrackerApp:
                 rel_parent = Path(project_folder_name)
 
         recycle_dir = self.recycle_bin_folder / rel_parent
-        recycle_dir.mkdir(parents=True, exist_ok=True)
+        self._makedirs(recycle_dir)
         destination = recycle_dir / f"{stamp}_{original.name}"
-        shutil.move(str(source), str(destination))
+        self._move(source, destination)
 
         manifest = self._load_recycle_manifest()
         manifest.append(
@@ -4203,8 +4311,8 @@ class DocumentTrackerApp:
                 if original_path.exists():
                     messagebox.showwarning("Restore", f"Skip existing path:\n{original_path}", parent=dialog)
                     continue
-                original_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(recycle_path), str(original_path))
+                self._makedirs(original_path.parent)
+                self._move(recycle_path, original_path)
                 restored_paths.add(str(recycle_path))
                 restored_count += 1
 
@@ -4243,13 +4351,13 @@ class DocumentTrackerApp:
             ext = file_path.suffix or ".bin"
             target = snapshot_dir / f"{stamp}__{checksum}{ext}"
             if os.name == "nt":
-                result = subprocess.run(
+                result = self._run_subprocess(
                     [
                         "robocopy",
                         str(file_path.parent),
                         str(snapshot_dir),
                         file_path.name,
-                        f"/A-:RSH",
+                        "/A-:RSH",
                         "/R:1",
                         "/W:1",
                         "/NFL", "/NDL", "/NJH", "/NJS", "/NP",
@@ -4264,7 +4372,7 @@ class DocumentTrackerApp:
                         copied.replace(target)
                     return
                 # robocopy failed — fall through to shutil
-            shutil.copy2(file_path, target)
+            shutil.copy2(self._path_for_python_io(file_path), self._path_for_python_io(target))
         except Exception:
             # Snapshot saving is best-effort; never block the main operation.
             pass

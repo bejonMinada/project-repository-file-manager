@@ -1,53 +1,145 @@
-# Project Repository File Manager 3.0
+# Project Repository File Manager 3.1
 
-Project Repository File Manager is a local desktop application for organizing project folders, tracking files, comparing revisions, restoring snapshots, and keeping project notes in a responsive Tkinter workspace.
+**Project Repository File Manager** is a local desktop application for organizing project folders, tracking file changes, comparing revisions, restoring snapshots, and managing project notes in a responsive Tkinter workspace.
 
-All data is stored locally in CSV files inside the application folder. No cloud service, external database, or internet connection is required for normal use.
+All data is stored locally in CSV files. No cloud service, external database, or internet connection is required. ✓ Cross-platform support (Windows, macOS, Linux).
 
-## About Dialog Description
+## About
 
-Project Repository File Manager is shown in-app as a local desktop application for organizing project folders, tracking file changes, comparing revisions, restoring snapshots, and managing project notes in a responsive workspace. All data stays on the device with no cloud dependency.
+Local desktop file and project tracker with change detection, revision management, and session archiving. Designed for teams and individuals managing project repositories locally with full version history and recovery capabilities.
 
-## Features
+## Core Features
 
-- Auto-detects project folders inside the built-in `repository` directory on launch and during global refresh.
-- Repository path is configurable from `Settings`, including OneDrive-synced SharePoint folders.
-- Global `Refresh` scans the entire repository and updates all projects and tracked file records.
-- Refresh uses checksum reuse for unchanged files to reduce scan time on large repositories.
-- Snapshot support for tracked files (used by compare/restore workflows).
-- Diff view for text-readable files using previous snapshots, with metadata fallback for non-text files.
-- Restore previous revision for a selected tracked file.
-- Tracks files with checksum-based change detection (`ADD`, `REMOVE`, `MODIFY`, `MOVE`, `META_UPDATE`).
-- Lets you add both files and folders into a selected project.
-- File browser supports folder navigation with double-click to enter and `Back` to go up one level.
-- Breadcrumb path display for current folder level.
-- Uses file-type icons (including a zipped-folder icon for compressed files).
-- Lets you open, rename, and remove tracked files/folders.
-- Recycle-bin behavior for removals (`recycle_bin/`) instead of immediate permanent deletion.
-- Project pin/favorite support and per-project tag editing.
-- File browser supports queued `Copy File` and `Move File` actions, then `Copy Here` or `Move Here` on white-space in the destination folder view.
-- Advanced file filtering: filename, extension, and note text.
-- History filter by change type.
-- Session capture/restore via ZIP (`Capture Session` / `Restore Session`) with default save/open path in backup `Session/`.
-- Auto-generated backup workspace folders: `Backups/` and `Session/`.
-- Restore project from auto-backup by selecting a timestamped backup folder.
-- Recycle-bin restore is project-scoped to prevent cross-project file mixing.
-- File context menu tools: `Extract Selected Archives Here`, `Compress Selected to ZIP`, and `Compress Folder to ZIP`.
-- Name collisions now support numbered suffixes:
-	- Archive extraction auto-renames duplicates to `name(1)`, `name(2)`, etc.
-	- Copy/Move paste prompts the user to proceed with numbered duplicate names.
-- Activity dashboard with totals and most active project.
-- Responsive right-side panel with scrollable Details, History, and Project Notes sections.
+### Project & File Management
+- Auto-detects project folders inside the configurable `repository` directory on launch and during global refresh.
+- Adds individual files and folders to projects for tracking.
+- Built-in file browser with folder navigation (double-click to enter, **Backspace** to go back one level).
+- Breadcrumb path display showing current folder depth.
+- File-type icons with special icon for compressed archives.
+- Per-file and folder operations: open, rename, remove.
+
+### Change Detection & Versioning
+- Checksum-based change detection (SHA-256) with change types: `ADD`, `REMOVE`, `MODIFY`, `MOVE`, `META_UPDATE`.
+- Snapshot support for tracked files with restore capability.
+- Diff view for text files using previous snapshots; metadata fallback for binary files.
+- Restore any previous file revision with timestamp reference.
+
+### Repository & Settings
+- Configurable repository path via Settings (supports OneDrive-synced SharePoint folders, network drives, etc.).
+- Global **Refresh** scans entire repository and updates all project/file metadata.
+- Checksum cache reuse for unchanged files (faster scans on large repositories).
+- Auto-generated backup folders: `Backups/` (timestamped) and `Session/` (for session archives).
+- Restore entire project from timestamped backup folder.
+
+### File Operations & Clipboard
+- Queued **Copy** and **Move** actions with multi-file support.
+- Paste operations with collision detection and auto-numbered duplicates (`name(1)`, `name(2)`, etc.).
+- Context menu tools:
+	- Extract Selected Archives Here
+	- Compress Selected Items to ZIP
+	- Compress Folder to ZIP (preserves folder names with dots, e.g., "test program rev. 1.zip")
+
+### Organization & Filtering
+- Project pinning/favorites and custom tag editing.
+- Advanced file filtering by filename, extension, note text.
+- History filter by change type with searchable export.
+- Activity dashboard with project statistics and most-active ranking.
+
+### Data Safety & Recovery
+- Recycle bin for file removals (soft delete with restore option).
+- Project-scoped recycle bin restore (prevents cross-project mixing).
+- Auto-backup before data-destructive operations (Reset, Restore).
+- Session capture/restore via ZIP with default paths in `Backups/Session/`.
+
+### UI & Keyboard Shortcuts
+- Responsive right-side panel: Details, History, Project Notes (scrollable).
 - Keyboard shortcuts:
-	- `Ctrl+F`: focus file search
-	- `Ctrl+N`: add project
-	- `Ctrl+C`: copy selected file/folder
-	- `Ctrl+X`: cut selected file/folder
-	- `Ctrl+V`: paste queued items
-	- `Ctrl+Z`: undo last supported file operation
-	- `Backspace`: go to parent folder
-	- `Delete`: remove selected file/folder or selected note
-	- `F5`: global refresh
+	- `Ctrl+F` → Focus file search
+	- `Ctrl+N` → Add project
+	- `Ctrl+C` → Copy selected file/folder
+	- `Ctrl+X` → Cut selected file/folder
+	- `Ctrl+V` → Paste queued items
+	- `Ctrl+Z` → Undo last supported operation
+	- **`Backspace`** → Go back one folder level
+	- `Delete` → Remove selected file/folder or note
+	- `F5` → Global refresh
+
+## Technical Stack
+
+- **Language**: Python 3.14
+- **UI Framework**: Tkinter + TTK (built-in, no external GUI dependencies)
+- **Packaging**: PyInstaller (single-file executable)
+- **Data Storage**: CSV files (human-readable, version-control friendly)
+- **Hashing**: SHA-256 for change detection
+- **Platform**: Windows, macOS, Linux
+
+## Installation & Usage
+
+1. Download the latest executable: `Project Repository File Manager.exe` (Windows) or run `python main.py` (cross-platform).
+2. On first launch, configure the repository path (defaults to `./repository`).
+3. Add projects and files to track; files are scanned for changes on refresh.
+4. Use snapshot/diff workflows to compare and restore file versions.
+5. Archive sessions or export history as needed.
+
+## Data Storage
+
+- **Projects** → `projects.csv`
+- **Tracked Files** → `files.csv`
+- **Change Log** → `change_log.csv`
+- **Project Notes** → `todos.csv`, `item_inventory.csv`
+- **Settings** → `app_settings.json`
+- **Backups** → `Backups/` (timestamped folders)
+- **Archives** → `Session/` (session ZIP files)
+- **Recycle Bin** → `recycle_bin/` (removed files)
+- **Snapshots** → `snapshots/` (file versions for diff/restore)
+
+## Keyboard Navigation
+
+| Key | Action |
+|-----|--------|
+| `F5` | Refresh all projects and files |
+| `Backspace` | Navigate back one folder level in file browser |
+| `Ctrl+F` | Focus file search input |
+| `Ctrl+N` | Add new project |
+| `Ctrl+C` | Copy file/folder to clipboard queue |
+| `Ctrl+X` | Cut file/folder to clipboard queue |
+| `Ctrl+V` | Paste queued items (with collision handling) |
+| `Ctrl+Z` | Undo last file operation |
+| `Delete` | Soft-delete selected item to recycle bin |
+
+## Performance Notes
+
+- Refresh uses cached checksums; only new/modified files are re-hashed.
+- Large repositories (1000+ files) scan in seconds on modern hardware.
+- Archive operations use ZIP compression with streaming for memory efficiency.
+- Recycle bin integrates with system cleanup tools.
+
+## Troubleshooting
+
+**"Could not create backup before reset"**
+- Ensure backup folder path is writable and not on a network with connectivity issues.
+
+**Files not updating in refresh**
+- Verify tracked files exist and are readable; check permissions.
+- Large files (>1GB) may take longer to hash.
+
+**Archive extraction fails**
+- Ensure target folder has write permissions.
+- Check disk space for extraction.
+
+## Version History
+
+- **3.1** – Fixed folder ZIP naming (preserves dots in folder names), enhanced reset to force-delete locked folders, cleanup.
+- **3.0** – Performance optimization, terminal integration, long-path support on Windows.
+- **2.x** – Initial stable release.
+
+## License
+
+See LICENSE file.
+
+## Contributing
+
+To contribute, fork the repository, make changes, test thoroughly, and submit a pull request to the main branch.
 - Shows project change history and supports viewing history as a text file.
 - Supports per-project notes.
 - Includes reset functionality with confirmation text for full local data cleanup, including snapshots and recycle bin contents.
