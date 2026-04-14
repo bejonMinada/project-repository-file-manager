@@ -1,4 +1,4 @@
-# Project Repository File Manager 3.2
+# Project Repository File Manager 3.3
 
 **Project Repository File Manager** is a local desktop application for organizing project folders, tracking file changes, comparing revisions, restoring snapshots, and managing project notes in a responsive Tkinter workspace.
 
@@ -23,6 +23,7 @@ Local desktop file and project tracker with change detection, revision managemen
 - Snapshot support for tracked files with restore capability.
 - Diff view for text files using previous snapshots; metadata fallback for binary files.
 - Restore any previous file revision with timestamp reference.
+- **Change history entries include the username** of the person who triggered the change (login name auto-detected).
 
 ### Repository & Settings
 - Configurable repository path via Settings (supports OneDrive-synced SharePoint folders, network drives, etc.).
@@ -38,6 +39,7 @@ Local desktop file and project tracker with change detection, revision managemen
 	- Extract Selected Archives Here
 	- Compress Selected Items to ZIP
 	- Compress Folder to ZIP (preserves folder names with dots, e.g., "test program rev. 1.zip")
+- **Right-click context menu** on files and folders in the file browser.
 
 ### Organization & Filtering
 - Project pinning/favorites and custom tag editing.
@@ -45,7 +47,13 @@ Local desktop file and project tracker with change detection, revision managemen
 - History filter by change type with searchable export.
 - Activity dashboard with project statistics and most-active ranking.
 
-### Data Safety & Recovery
+### Collaboration & Authorship
+- Every change log entry is stamped with the **Windows login username** of the person who made it.
+- File notes (per-file) record the **note author** (last person to write/edit the note).
+- Project notes record the **username** of the creator and last editor; shown inline in the notes list.
+- File details panel shows **Added By** (who first tracked the file) and **Last Modified By** (who last changed its content via the app).
+- Locked files (e.g., open in OneDrive/PowerPoint) are **included in scans** rather than skipped; the previous checksum is reused until the file is accessible again.
+
 - Recycle bin for file removals (soft delete with restore option).
 - Project-scoped recycle bin restore with multi-select and Restore All support.
 - Auto-backup before data-destructive operations (Reset).
@@ -131,6 +139,7 @@ Local desktop file and project tracker with change detection, revision managemen
 
 ## Version History
 
+- **3.3** – Collaboration authorship tracking: username stamped on all change log entries, file notes, project notes, Added By / Last Modified By fields in file details; locked file handling in scanner (OneDrive/SharePoint compatibility); right-click context menu improvements.
 - **3.2** – Multi-select + Restore All in recycle bin and auto-backup restore dialogs; F2 rename for files and folders; Ctrl+A in recycle bin dialog; full horizontal and vertical scrollbars on all text boxes; restore history logging.
 - **3.1** – Fixed folder ZIP naming (preserves dots in folder names), removed terminal integration, enhanced reset to force-delete locked folders, cleanup.
 - **3.0** – Performance optimization, terminal integration, long-path support on Windows.

@@ -28,6 +28,9 @@ FILES_SCHEMA = [
     "last_modified",
     "checksum",
     "notes",
+    "note_author",
+    "added_by",
+    "last_modified_by",
 ]
 
 CHANGE_LOG_SCHEMA = [
@@ -38,6 +41,7 @@ CHANGE_LOG_SCHEMA = [
     "old_value",
     "new_value",
     "note",
+    "username",
 ]
 
 TODO_SCHEMA = [
@@ -46,6 +50,7 @@ TODO_SCHEMA = [
     "title",
     "description",
     "created_date",
+    "username",
 ]
 
 ITEM_INVENTORY_SCHEMA = [

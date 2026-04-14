@@ -1,4 +1,5 @@
 import os
+import getpass
 import json
 import hashlib
 import shutil
@@ -1171,6 +1172,7 @@ class DocumentTrackerApp:
                 last_modified=datetime.fromtimestamp(destination_path.stat().st_mtime).isoformat(),
                 checksum=checksum,
                 notes="",
+                added_by=getpass.getuser(),
             )
             self.csv.append_row("files", tracked.to_dict())
             self._save_snapshot_for_file(self.selected_project.project_id, destination_path, relative_path)
@@ -1444,6 +1446,7 @@ class DocumentTrackerApp:
                     last_modified=row["last_modified"],
                     checksum=row["checksum"],
                     notes="",
+                    added_by=getpass.getuser(),
                 )
                 self.csv.append_row("files", tracked.to_dict())
                 file_path = project_root / Path(rel_path)
@@ -1874,6 +1877,9 @@ class DocumentTrackerApp:
             f"Last Modified: {formatted_modified}\n"
             f"Checksum: {self.selected_file.checksum}\n"
             f"File Notes: {self.selected_file.notes}\n"
+            f"Note Author: {self.selected_file.note_author}\n"
+            f"Added By: {self.selected_file.added_by}\n"
+            f"Last Modified By: {self.selected_file.last_modified_by}\n"
         )
         self.details_text.insert(tk.END, details)
         self.details_text.config(state="disabled")
@@ -1890,8 +1896,10 @@ class DocumentTrackerApp:
             if filter_type and filter_type != "ALL" and row.get("change_type", "").upper() != filter_type:
                 continue
             timestamp = self._format_datetime_readable(row.get("timestamp", ""))
+            username = row.get("username", "").strip()
             entry = self._history_entry_text(row)
-            self.history_text.insert(tk.END, f"{timestamp} | {entry}\n")
+            user_tag = f" [{username}]" if username else ""
+            self.history_text.insert(tk.END, f"{timestamp}{user_tag} | {entry}\n")
         self.history_text.config(state="disabled")
         self._show_project_todos()
 
@@ -1908,7 +1916,9 @@ class DocumentTrackerApp:
         todos = self.project_todos.get(self.selected_project.project_id, [])
         for todo in todos:
             title = todo.get("title", "").strip() or todo.get("description", "")[:60]
-            self.todo_listbox.insert(tk.END, title)
+            username = todo.get("username", "").strip()
+            label = f"{title}  [{username}]" if username else title
+            self.todo_listbox.insert(tk.END, label)
 
     def _note_popup(self, title_init: str = "", desc_init: str = "", read_only: bool = False, window_title: str = "Note") -> tuple[str, str] | None:
         """Display a title+content note form. In read_only mode shows Close/Edit buttons.
@@ -2009,6 +2019,7 @@ class DocumentTrackerApp:
             "title": title,
             "description": description,
             "created_date": datetime.now().isoformat(),
+            "username": getpass.getuser(),
         }
         self.csv.append_row("todos", todo_row)
         change = ChangeRecord(
@@ -2102,6 +2113,11 @@ class DocumentTrackerApp:
                     row["title"] = new_title
                     row["description"] = new_desc
                     break
+            current_user = getpass.getuser()
+            for row in all_todos:
+                if row.get("project_id") == self.selected_project.project_id and row.get("todo_id") == todo_id:
+                    row["username"] = current_user
+                    break
             self.csv.write_rows("todos", all_todos)
             change = ChangeRecord(
                 timestamp=datetime.now().isoformat(),
@@ -2147,6 +2163,11 @@ class DocumentTrackerApp:
             if row.get("project_id") == self.selected_project.project_id and row.get("todo_id") == todo_id:
                 row["title"] = new_title
                 row["description"] = new_desc
+                break
+        current_user = getpass.getuser()
+        for row in all_todos:
+            if row.get("project_id") == self.selected_project.project_id and row.get("todo_id") == todo_id:
+                row["username"] = current_user
                 break
         self.csv.write_rows("todos", all_todos)
         change = ChangeRecord(
@@ -2243,6 +2264,8 @@ class DocumentTrackerApp:
         editor.geometry("600x320")
 
         ttk.Label(editor, text=f"File Notes for: {self.selected_file.relative_path}").pack(anchor="w", padx=10, pady=(10, 0))
+        if self.selected_file.note_author:
+            ttk.Label(editor, text=f"Last edited by: {self.selected_file.note_author}", foreground="gray").pack(anchor="w", padx=10)
         note_frame = ttk.Frame(editor)
         note_frame.pack(fill="both", expand=True, padx=10, pady=(6, 10))
         note_frame.columnconfigure(0, weight=1)
@@ -2261,11 +2284,14 @@ class DocumentTrackerApp:
 
         def save_note() -> None:
             note_value = note_text.get("1.0", tk.END).strip()
+            current_user = getpass.getuser()
             file_rows = self.csv.read_rows("files")
             for row in file_rows:
                 if row.get("file_id") == self.selected_file.file_id:
                     row["notes"] = note_value
+                    row["note_author"] = current_user
                     self.selected_file.notes = note_value
+                    self.selected_file.note_author = current_user
                     break
             self.csv.write_rows("files", file_rows)
             change = ChangeRecord(
@@ -2408,6 +2434,7 @@ class DocumentTrackerApp:
                 last_modified=datetime.fromtimestamp(target_path.stat().st_mtime).isoformat(),
                 checksum=compute_checksum(target_path),
                 notes="",
+                added_by=getpass.getuser(),
             )
             self.csv.append_row("files", tracked.to_dict())
             self.csv.append_row("change_log", ChangeRecord(
@@ -3289,6 +3316,7 @@ class DocumentTrackerApp:
                 row["file_size"] = str(new_path.stat().st_size)
                 row["last_modified"] = datetime.fromtimestamp(new_path.stat().st_mtime).isoformat()
                 row["checksum"] = compute_checksum(new_path)
+                row["last_modified_by"] = getpass.getuser()
                 break
         self.csv.write_rows("files", file_rows)
         change = ChangeRecord(
@@ -3734,6 +3762,8 @@ class DocumentTrackerApp:
                     row["file_size"] = current["file_size"]
                     row["last_modified"] = current["last_modified"]
                     row["checksum"] = current["checksum"]
+                    if current["checksum"] != row.get("checksum", ""):
+                        row["last_modified_by"] = getpass.getuser()
                     project_updated_rows.append(row)
 
                 existing_paths = {row.get("relative_path", "") for row in project_updated_rows}
@@ -3751,6 +3781,7 @@ class DocumentTrackerApp:
                         "last_modified": row["last_modified"],
                         "checksum": row["checksum"],
                         "notes": "",
+                        "added_by": getpass.getuser(),
                     })
 
                 project_row["last_scanned_date"] = datetime.now().isoformat()

@@ -1,3 +1,4 @@
+import getpass
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict
@@ -48,6 +49,9 @@ class TrackedFile:
     last_modified: str
     checksum: str
     notes: str = ""
+    note_author: str = ""
+    added_by: str = ""
+    last_modified_by: str = ""
 
     @classmethod
     def from_dict(cls, row: Dict[str, str]) -> "TrackedFile":
@@ -60,6 +64,9 @@ class TrackedFile:
             last_modified=row.get("last_modified", ""),
             checksum=row.get("checksum", ""),
             notes=row.get("notes", ""),
+            note_author=row.get("note_author", ""),
+            added_by=row.get("added_by", ""),
+            last_modified_by=row.get("last_modified_by", ""),
         )
 
     def to_dict(self) -> Dict[str, str]:
@@ -72,6 +79,9 @@ class TrackedFile:
             "last_modified": self.last_modified,
             "checksum": self.checksum,
             "notes": self.notes,
+            "note_author": self.note_author,
+            "added_by": self.added_by,
+            "last_modified_by": self.last_modified_by,
         }
 
 @dataclass
@@ -83,6 +93,7 @@ class ChangeRecord:
     old_value: str
     new_value: str
     note: str = ""
+    username: str = field(default_factory=getpass.getuser)
 
     def to_dict(self) -> Dict[str, str]:
         return {
@@ -93,4 +104,5 @@ class ChangeRecord:
             "old_value": self.old_value,
             "new_value": self.new_value,
             "note": self.note,
+            "username": self.username,
         }

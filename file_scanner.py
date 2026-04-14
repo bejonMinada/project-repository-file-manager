@@ -32,7 +32,10 @@ def scan_project_files_with_cache(
         if extensions and path.suffix.lower() not in extensions:
             continue
 
-        stat = path.stat()
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
         relative = path.relative_to(root_path)
         relative_path = str(relative).replace("\\", "/")
         file_size = str(stat.st_size)
@@ -42,7 +45,12 @@ def scan_project_files_with_cache(
         if cached and cached[0] == file_size and cached[1] == last_modified:
             checksum = cached[2]
         else:
-            checksum = compute_checksum(path)
+            try:
+                checksum = compute_checksum(path)
+            except PermissionError:
+                checksum = cached[2] if cached else ""
+            except OSError:
+                checksum = cached[2] if cached else ""
 
         yield {
             "relative_path": relative_path,
